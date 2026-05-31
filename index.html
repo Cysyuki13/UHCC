@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="w-full h-full">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Neon Rush - Ultimate Lobby Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" href="data:,">
+</head>
+
+<body class="w-full h-full flex flex-col justify-between select-none relative overflow-hidden">
+
+    <div id="menu-screen"
+        class="absolute inset-0 bg-[#0e071a] flex flex-col items-center justify-center p-4 z-40 transition-opacity duration-300">
+        <div
+            class="max-w-md w-full bg-[#160c2b] border border-[#2d1b54] p-6 rounded-2xl flex flex-col items-center shadow-2xl relative">
+
+            <div class="absolute -top-12 flex flex-col items-center">
+                <span class="orbitron text-3xl font-extrabold text-[#00f2fe] tracking-widest neon-text-blue">NEON
+                    RUSH</span>
+                <span class="text-[10px] text-gray-400 tracking-wider">ULTIMATE LOBBY PLATFORMER</span>
+            </div>
+
+            <div id="panel-main" class="w-full space-y-4 mt-6">
+                <button onclick="switchPanel('panel-play')"
+                    class="w-full py-4 rounded-xl bg-gradient-to-r from-[#00f2fe] to-[#4facfe] text-black font-extrabold text-lg tracking-wide orbitron hover:brightness-110 active:scale-[0.98] transition shadow-[0_0_20px_rgba(0,242,254,0.3)]">
+                    ▶ 開始遊戲 (PLAY)
+                </button>
+                <button onclick="switchPanel('panel-settings')"
+                    class="w-full py-3 rounded-xl bg-[#20113c] border border-[#2d1b54] text-gray-300 font-bold hover:bg-[#2d1b54] transition">
+                    ⚙️ 設定 (SETTINGS)
+                </button>
+            </div>
+
+            <div id="panel-play" class="w-full space-y-4 mt-6 hidden">
+                <button onclick="initHost()"
+                    class="w-full py-4 rounded-xl bg-gradient-to-r from-[#ff007f] to-[#ff007f]/70 text-white font-extrabold text-lg tracking-wide orbitron hover:brightness-110 active:scale-[0.98] transition">
+                    👑 建立房間 (Create Room)
+                </button>
+                <div class="flex items-center my-2">
+                    <hr class="flex-grow border-[#2d1b54]">
+                    <span class="px-3 text-xs text-gray-500">或</span>
+                    <hr class="flex-grow border-[#2d1b54]">
+                </div>
+                <div class="flex gap-2">
+                    <input id="room-input" type="text" placeholder="4位數代碼..." maxlength="4"
+                        class="flex-grow bg-[#0c0516] border border-[#2d1b54] text-center text-xl text-[#00f2fe] rounded-xl focus:outline-none focus:border-[#00f2fe] placeholder-gray-600 orbitron">
+                    <button onclick="initGuest()"
+                        class="px-6 py-4 rounded-xl bg-[#20113c] border border-[#ff007f] text-[#ff007f] font-bold text-md hover:bg-[#ff007f] hover:text-white transition">
+                        加入 Room
+                    </button>
+                </div>
+                <button onclick="switchPanel('panel-main')"
+                    class="w-full py-2 text-xs text-gray-500 hover:text-gray-300 transition underline text-center block pt-2">
+                    返回主選單
+                </button>
+            </div>
+
+            <div id="panel-settings" class="w-full space-y-4 mt-6 hidden text-gray-300 text-sm">
+                <h3 class="orbitron text-[#00f2fe] font-bold border-b border-[#2d1b54] pb-2 mb-2 text-center">遊戲控制說明
+                </h3>
+                <ul class="space-y-1 list-disc list-inside text-gray-400">
+                    <li>鍵盤控制：<span class="text-white">A / D</span> 或 <span class="text-white">◀ / ▶</span> 移動</li>
+                    <li>跳躍控制：<span class="text-white">W</span> 或 <span class="text-white">Space 空白鍵</span></li>
+                    <li>大廳規則：達到 <span class="text-[#00f2fe]">2-6人</span> 後，前往最右側的<span
+                            class="text-yellow-400 font-bold">金色傳送門</span>即可啟動戰局</li>
+                </ul>
+                <button onclick="switchPanel('panel-main')"
+                    class="w-full py-3 mt-4 rounded-xl bg-[#20113c] border border-[#2d1b54] text-white font-bold transition">
+                    完成並返回
+                </button>
+            </div>
+
+            <div id="panel-status" class="w-full hidden space-y-4 mt-6">
+                <div class="bg-[#0c0516] border border-[#2d1b54] p-4 rounded-xl text-center">
+                    <div id="status-spinner"
+                        class="animate-spin rounded-full h-8 w-8 border-b-2 border-[#00f2fe] mx-auto mb-3"></div>
+                    <div id="status-text" class="text-gray-300 text-sm">正在與 WebRTC 伺服器同步中...</div>
+                </div>
+                <div id="room-code-display"
+                    class="hidden text-center bg-[#07030d] p-3 rounded-lg border border-dashed border-[#00f2fe]/40">
+                    <span class="text-xs text-gray-500 block">房間密碼（請分享給朋友）：</span>
+                    <span id="room-code"
+                        class="orbitron text-3xl font-black text-[#00f2fe] tracking-widest neon-text-blue">----</span>
+                </div>
+                <button onclick="cancelConnection()"
+                    class="w-full py-2 bg-red-950/40 border border-red-500/30 text-red-400 rounded-xl text-xs hover:bg-red-900/30 transition">
+                    放棄連線
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <header
+        class="w-full bg-[#0a0514]/90 backdrop-blur-md border-b border-[#1b0f30] px-4 py-3 flex justify-between items-center z-10">
+        <div class="flex items-center gap-4">
+            <div class="flex flex-col">
+                <span class="text-[10px] text-cyan-400 orbitron">連線人數 (PLAYERS)</span>
+                <span id="player-count-hud" class="text-xl font-black text-cyan-300 orbitron neon-text-blue">1 /
+                    6</span>
+            </div>
+            <div class="text-gray-600">|</div>
+            <div class="flex flex-col">
+                <span class="text-[10px] text-purple-400 orbitron">當前狀態</span>
+                <span id="game-state-hud" class="text-sm font-bold text-yellow-400">主選單配置中</span>
+            </div>
+        </div>
+
+        <div class="flex flex-col items-center">
+            <span class="text-[10px] text-gray-500 orbitron">MATCH TIMER</span>
+            <span id="timer" class="text-2xl font-bold text-yellow-400 orbitron">60</span>
+        </div>
+
+        <div class="flex items-center gap-3">
+            <div class="flex flex-col text-right">
+                <span class="text-[9px] text-gray-500">ROOM ID</span>
+                <span id="hud-room" class="text-xs text-[#00f2fe] orbitron">NONE</span>
+            </div>
+            <button onclick="disconnectGame()"
+                class="px-3 py-1.5 bg-red-950/40 border border-red-500/30 text-red-400 rounded-lg text-xs hover:bg-red-900/30 transition">
+                🚪 斷開連線
+            </button>
+        </div>
+    </header>
+
+    <main id="game-container" class="flex-grow w-full relative bg-[#090410] flex items-center justify-center">
+        <canvas id="gameCanvas"
+            class="max-w-full max-h-full block aspect-[16/9] shadow-2xl border-y border-[#180a2b] bg-[#0c0516]"></canvas>
+
+        <div id="countdown-overlay"
+            class="absolute inset-0 bg-black/70 flex flex-col items-center justify-center z-20 hidden">
+            <span id="countdown-num"
+                class="orbitron text-8xl font-black text-[#00f2fe] neon-text-blue animate-ping">3</span>
+            <span id="countdown-sub" class="text-sm text-gray-400 mt-4 tracking-wider">傳送門即將開啟，準備進行決戰...</span>
+        </div>
+
+        <div id="gameover-overlay"
+            class="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-20 hidden">
+            <div class="max-w-xs w-full bg-[#18082e] border-2 border-yellow-500 p-6 rounded-2xl text-center shadow-lg">
+                <span class="orbitron text-2xl font-black text-yellow-500 tracking-wider">MATCH OVER</span>
+                <div id="match-result" class="text-md font-bold text-white my-4">回合結束！</div>
+                <button onclick="backToInteractiveLobby()"
+                    class="w-full py-3 bg-gradient-to-r from-cyan-500 to-blue-500 text-black font-black text-md orbitron rounded-xl hover:brightness-110 transition">
+                    🔄 返回互動大廳
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <div id="touch-controls"
+        class="w-full bg-[#07030d] border-t border-[#140a24] px-4 py-4 grid grid-cols-2 gap-4 select-none z-10 md:hidden">
+        <div class="flex gap-4 items-center">
+            <button id="btn-left"
+                class="v-btn w-16 h-16 rounded-2xl flex items-center justify-center text-2xl text-white">◀</button>
+            <button id="btn-right"
+                class="v-btn w-16 h-16 rounded-2xl flex items-center justify-center text-2xl text-white">▶</button>
+        </div>
+        <div class="flex justify-end items-center">
+            <button id="btn-jump"
+                class="v-btn w-20 h-16 rounded-2xl flex items-center justify-center text-lg text-[#00f2fe] font-black orbitron">JUMP</button>
+        </div>
+    </div>
+
+    <div id="disconnect-modal" class="hidden fixed inset-0 w-full h-full bg-black/80 backdrop-blur-sm z-50">
+        <div
+            class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-[#1c0812] border-2 border-red-500 p-8 rounded-2xl text-center w-[90%] max-w-[380px] text-white">
+            <h2 class="orbitron text-red-500 font-extrabold text-2xl tracking-wider mb-4">⚠️ 連線已中斷</h2>
+            <p class="text-gray-300 text-sm mb-6">房主已解散房間或您與 PeerJS 伺服器失去連結。</p>
+            <button onclick="location.reload()"
+                class="w-full py-3 bg-red-600 text-white font-extrabold text-md rounded-xl hover:bg-red-500 transition">
+                重置並回到主選單
+            </button>
+        </div>
+    </div>
+
+    <script src="script.js" defer></script>
+</body>
+
+</html>
