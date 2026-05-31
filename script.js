@@ -41,7 +41,7 @@ canvas.height = BASE_HEIGHT;
 // UPDATED PHYSICS CONSTANTS: Floatier gravity and friction handling
 const GRAVITY = 0.35;
 const FRICTION = 0.85;
-const MAX_FALL_SPEED = 8;
+const MAX_FALL_SPEED = 5;
 const MOVE_SPEED = 2;
 const DASH_SPEED = 14;
 
@@ -67,6 +67,16 @@ let hazards = [];
 let gems = [];
 
 let particles = [];
+
+// NEW: Camera and Viewport Scaling Configuration
+let camera = {
+    x: 0,
+    y: 0,
+    zoom: 1.0,        // Current interpolated zoom value
+    targetZoom: 1.0,  // Viewport destination zoom value
+    minZoom: 1.0,     // Zoomed all the way out (See full 1280x720 map)
+    maxZoom: 2.5      // Zoomed all the way in close to character
+};
 
 // Dynamic Door Object configuration
 const lobbyDoor = {
@@ -736,13 +746,69 @@ function updateAndRenderParticles() {
     }
 }
 
+function drawOffscreenRadarIndicators() {
+    if (!players[localPlayerId]) return;
+
+    const padding = 25; // Margin away from canvas edges
+
+    for (let id in players) {
+        if (id === localPlayerId) continue; // Skip ourselves
+
+        let p = players[id];
+
+        // Convert world platform positions into real screen pixel positions
+        let screenX = (p.x + p.width / 2 - camera.x) * camera.zoom;
+        let screenY = (p.y + p.height / 2 - camera.y) * camera.zoom;
+
+        // Determine if target coordinates sit outside our 1280x720 window
+        let isOffscreen = (screenX < 0 || screenX > BASE_WIDTH || screenY < 0 || screenY > BASE_HEIGHT);
+
+        if (isOffscreen) {
+            // Pin arrow coordinates cleanly inside screen boundaries
+            let arrowX = Math.max(padding, Math.min(BASE_WIDTH - padding, screenX));
+            let arrowY = Math.max(padding, Math.min(BASE_HEIGHT - padding, screenY));
+
+            // Derive directional rotation pointing outward toward player's position
+            let angle = Math.atan2(screenY - arrowY, screenX - arrowX);
+
+            ctx.save();
+            ctx.translate(arrowX, arrowY);
+            ctx.rotate(angle);
+
+            // Draw a high-visibility neon triangular arrow matching player color
+            ctx.fillStyle = p.color;
+            ctx.shadowColor = p.color;
+            ctx.shadowBlur = 10;
+
+            ctx.beginPath();
+            ctx.moveTo(12, 0);     // Tip of pointer facing outward
+            ctx.lineTo(-8, -10);   // Back top tail
+            ctx.lineTo(-4, 0);     // Indented center tail
+            ctx.lineTo(-8, 10);    // Back bottom tail
+            ctx.closePath();
+            ctx.fill();
+
+            // Draw a micro label marker for player tracking identification
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 9px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText("PLR", -16, 3);
+
+            ctx.restore();
+        }
+    }
+}
+
 function enginePipelineTick() {
     ctx.fillStyle = '#0b0612';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     if (currentEngineMode === 'LOBBY' || currentEngineMode === 'GAME') {
-        if (players[localPlayerId]) {
-            updateCharacterPhysics(players[localPlayerId]);
+        let localPlayer = players[localPlayerId];
+
+        if (localPlayer) {
+            updateCharacterPhysics(localPlayer);
 
             if (isHost) {
                 evaluateLobbyDoorTrigger();
@@ -752,24 +818,51 @@ function enginePipelineTick() {
                     type: 'client_input_update',
                     senderId: localPlayerId,
                     payload: {
-                        x: players[localPlayerId].x,
-                        y: players[localPlayerId].y,
-                        facingRight: players[localPlayerId].facingRight,
-                        isDashing: players[localPlayerId].isDashing // NEW: Send to host
+                        x: localPlayer.x,
+                        y: localPlayer.y,
+                        facingRight: localPlayer.facingRight,
+                        isDashing: localPlayer.isDashing
                     }
                 });
             }
+
+            // --- CAMERA CALCULATIONS ---
+            // Interpolate scaling values smoothly
+            camera.zoom += (camera.targetZoom - camera.zoom) * 0.1;
+
+            // Calculate destination target centered squarely around player center
+            let targetCamX = (localPlayer.x + localPlayer.width / 2) - (BASE_WIDTH / 2) / camera.zoom;
+            let targetCamY = (localPlayer.y + localPlayer.height / 2) - (BASE_HEIGHT / 2) / camera.zoom;
+
+            // Clamp camera viewport coordinates to map borders (0,0 to 1280,720)
+            let maxCamX = BASE_WIDTH - BASE_WIDTH / camera.zoom;
+            let maxCamY = BASE_HEIGHT - BASE_HEIGHT / camera.zoom;
+            targetCamX = Math.max(0, Math.min(targetCamX, maxCamX));
+            targetCamY = Math.max(0, Math.min(targetCamY, maxCamY));
+
+            // Smooth horizontal and vertical camera transitions
+            camera.x += (targetCamX - camera.x) * 0.1;
+            camera.y += (targetCamY - camera.y) * 0.1;
+        } else {
+            // Default global fallback positioning rules if player profile missing
+            camera.zoom = 1.0;
+            camera.x = 0;
+            camera.y = 0;
         }
 
-        drawCanvasLevelLayout();
+        // ==========================================
+        // LAYER 1: WORLD SPACE RENDERING (TRANSFORMED)
+        // ==========================================
+        ctx.save();
+        ctx.scale(camera.zoom, camera.zoom);
+        ctx.translate(-camera.x, -camera.y);
 
-        // NEW: Step through particles logic loop
+        drawCanvasLevelLayout();
         updateAndRenderParticles();
 
         for (let id in players) {
             let p = players[id];
 
-            // NEW: If any player matrix state has active dash true, spit trailing sparks backwards!
             if (p.isDashing) {
                 for (let i = 0; i < 2; i++) {
                     particles.push({
@@ -783,9 +876,15 @@ function enginePipelineTick() {
                     });
                 }
             }
-
             drawCharacterModel(p);
         }
+        ctx.restore(); // Return back to standard 1:1 pixel grid definitions
+
+        // ==========================================
+        // LAYER 2: SCREEN SPACE RENDERING (UI & RADAR)
+        // ==========================================
+        drawOffscreenRadarIndicators(); // Draw pointer elements securely over gameplay
+
     } else {
         ctx.fillStyle = '#110924';
         ctx.font = '20px "Orbitron"';
@@ -809,6 +908,38 @@ window.addEventListener('keyup', (e) => {
     if (['ArrowRight', 'd', 'D'].includes(e.key)) keys.ArrowRight = false;
     if (['ArrowUp', 'w', 'W', ' '].includes(e.key)) keys.ArrowUp = false;
     if (e.code === 'ShiftLeft') keys.ShiftLeft = false; // NEW: Release physical Left Shift
+});
+
+// NEW: Mouse Observers for Viewport Toggle
+window.addEventListener('mousedown', (e) => {
+    if (e.button === 1) { // 1 is the Middle Mouse Button
+        e.preventDefault();
+        camera.isZoomed = !camera.isZoomed;
+        camera.targetZoom = camera.isZoomed ? 1.75 : 1.0; // 1.75x close up focus zoom
+    }
+});
+
+// NEW: Dynamic Scroll Wheel Zoom Observers
+window.addEventListener('wheel', (e) => {
+    // Only capture zoom adjustments if the game is active
+    if (currentEngineMode === 'LOBBY' || currentEngineMode === 'GAME') {
+        e.preventDefault(); // Stop the browser from scrolling the web page
+
+        const zoomSensitivity = 0.15; // Tuning variable for increment speed per notch
+
+        if (e.deltaY < 0) {
+            // Rolling Up -> Zoom In closer to character
+            camera.targetZoom = Math.min(camera.maxZoom, camera.targetZoom + zoomSensitivity);
+        } else if (e.deltaY > 0) {
+            // Rolling Down -> Zoom Out back toward full overview
+            camera.targetZoom = Math.max(camera.minZoom, camera.targetZoom - zoomSensitivity);
+        }
+    }
+}, { passive: false });
+
+// Keep this to prevent default middle-click scroll anchor popups from disrupting focus
+window.addEventListener('pointerdown', (e) => {
+    if (e.button === 1) e.preventDefault();
 });
 
 function bindTouchBtn(elementId, action) {
