@@ -5,32 +5,109 @@ body {
     user-select: none;
     -webkit-user-select: none;
 }
+
 .orbitron {
     font-family: 'Orbitron', sans-serif;
 }
+
 .neon-border {
     box-shadow: 0 0 15px rgba(0, 242, 254, 0.4), inset 0 0 10px rgba(0, 242, 254, 0.2);
     border: 2px solid #00f2fe;
 }
+
 .neon-border-pink {
     box-shadow: 0 0 15px rgba(255, 0, 127, 0.4), inset 0 0 10px rgba(255, 0, 127, 0.2);
     border: 2px solid #ff007f;
 }
+
 .neon-text-blue {
     text-shadow: 0 0 10px rgba(0, 242, 254, 0.8);
 }
+
 .neon-text-pink {
     text-shadow: 0 0 10px rgba(255, 0, 127, 0.8);
 }
+
 .v-btn {
     background: rgba(255, 255, 255, 0.05);
     backdrop-filter: blur(5px);
     border: 2px solid rgba(255, 255, 255, 0.1);
     transition: all 0.1s ease;
 }
+
 .v-btn:active {
     background: rgba(0, 242, 254, 0.2);
     border-color: #00f2fe;
     box-shadow: 0 0 15px rgba(0, 242, 254, 0.6);
     transform: scale(0.95);
+}
+
+/* Disabled color button styles */
+.color-btn.disabled-color {
+    cursor: not-allowed !important;
+    position: relative;
+    /* Keep full opacity on the parent so the red cross stays bright! */
+    border: 2px solid #ff003c !important;
+    box-shadow: 0 0 15px rgba(255, 0, 60, 0.4) !important;
+    overflow: hidden !important;
+    /* Ensures the dark overlay doesn't spill out of the rounded corners */
+    transform: scale(0.95);
+    /* Gives it a "locked/pressed" visual state */
+}
+
+/* 1. Dark overlay to dim the inline background color + Warning stripes */
+.color-btn.disabled-color::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.5);
+    /* Darkens the base color heavily */
+    background-image: repeating-linear-gradient(45deg,
+            transparent,
+            transparent 8px,
+            rgba(0, 0, 0, 0.5) 8px,
+            rgba(0, 0, 0, 0.5) 16px);
+    z-index: 1;
+    pointer-events: none;
+}
+
+.color-btn.selected-color {
+    border: 2px solid #fff !important;
+    box-shadow: 0 0 15px rgba(255, 255, 255, 0.8) !important;
+}
+
+.color-btn.border-white {
+    border: 2px solid #fff !important;
+    box-shadow: 0 0 15px rgba(255,255,255,0.8) !important;
+}
+.color-btn.scale-105 {
+    transform: scale(1.05);
+}
+
+/* 2. Bright Neon Red Cross */
+.color-btn.disabled-color::after {
+    content: 'X';
+    /* Changed from special ✕ symbol to a standard capital X */
+    font-family: Arial, sans-serif;
+    /* Forces a standard system font to guarantee rendering */
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 32px;
+    color: #ff003c;
+    font-weight: 900;
+    text-shadow: 0 0 10px rgba(255, 0, 60, 0.8),
+        0 0 20px rgba(255, 0, 60, 1);
+    z-index: 2;
+    pointer-events: none;
+}
+
+/* FIX: Only remove the pseudo-elements, never hide the parent button container */
+.color-btn.border-white.disabled-color::before,
+.color-btn.border-white.disabled-color::after {
+    display: none !important;
 }

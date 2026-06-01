@@ -179,6 +179,76 @@
         </div>
     </div>
 
+    <!-- Skin Customization Modal Menu -->
+    <div id="skin-modal"
+        class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
+        <div
+            class="bg-[#160c2b] border-2 border-[#ff007f] p-6 rounded-2xl max-w-sm w-full text-center shadow-[0_0_25px_rgba(255,0,127,0.4)]">
+            <h3 class="orbitron text-xl font-black text-[#ff007f] mb-2 tracking-wider neon-text-pink">SKIN EDITING
+                SYSTEM</h3>
+            <p class="text-xs text-gray-400 mb-5">Select a signature frequency color path:</p>
+
+            <div class="grid grid-cols-3 gap-3 mb-6">
+                <button onclick="selectCharacterColor('#ff007f', this)"
+                    class="color-btn w-full h-12 rounded-xl border-2 border-transparent hover:scale-105 active:scale-95 transition"
+                    data-color="#ff007f"
+                    style="background-color: #ff007f;"></button>
+                <button onclick="selectCharacterColor('#00f2fe', this)"
+                    class="color-btn w-full h-12 rounded-xl border-2 border-transparent hover:scale-105 active:scale-95 transition"
+                    data-color="#00f2fe"
+                    style="background-color: #00f2fe;"></button>
+                <button onclick="selectCharacterColor('#00ff66', this)"
+                    class="color-btn w-full h-12 rounded-xl border-2 border-transparent hover:scale-105 active:scale-95 transition"
+                    data-color="#00ff66"
+                    style="background-color: #00ff66;"></button>
+
+                <button onclick="selectCharacterColor('#ffff00', this)"
+                    class="color-btn w-full h-12 rounded-xl border-2 border-transparent hover:scale-105 active:scale-95 transition"
+                    data-color="#ffff00"
+                    style="background-color: #ffff00;"></button>
+                <button onclick="selectCharacterColor('#9400d3', this)"
+                    class="color-btn w-full h-12 rounded-xl border-2 border-transparent hover:scale-105 active:scale-95 transition"
+                    data-color="#9400d3"
+                    style="background-color: #9400d3;"></button>
+                <button onclick="selectCharacterColor('#ffaa00', this)"
+                    class="color-btn w-full h-12 rounded-xl border-2 border-transparent hover:scale-105 active:scale-95 transition"
+                    data-color="#ffaa00"
+                    style="background-color: #ffaa00;"></button>
+
+                <button onclick="selectCharacterColor('#181717', this)"
+                    class="color-btn w-full h-12 rounded-xl border-2 border-transparent hover:scale-105 active:scale-95 transition"
+                    data-color="#181717"
+                    style="background-color: #181717;"></button>
+                <button onclick="selectCharacterColor('#ff0055', this)"
+                    class="color-btn w-full h-12 rounded-xl border-2 border-transparent hover:scale-105 active:scale-95 transition"
+                    data-color="#ff0055"
+                    style="background-color: #ff0055;"></button>
+                <button onclick="selectCharacterColor('#ff5500', this)"
+                    class="color-btn w-full h-12 rounded-xl border-2 border-transparent hover:scale-105 active:scale-95 transition"
+                    data-color="#ff5500"
+                    style="background-color: #ff5500;"></button>
+
+                <button onclick="selectCharacterColor('#0011ff', this)"
+                    class="color-btn w-full h-12 rounded-xl border-2 border-transparent hover:scale-105 active:scale-95 transition"
+                    data-color="#0011ff"
+                    style="background-color: #0011ff;"></button>
+                <button onclick="selectCharacterColor('#ff97dc', this)"
+                    class="color-btn w-full h-12 rounded-xl border-2 border-transparent hover:scale-105 active:scale-95 transition"
+                    data-color="#ff97dc"
+                    style="background-color: #ff97dc;"></button>
+                <button onclick="selectCharacterColor('#5500ff', this)"
+                    class="color-btn w-full h-12 rounded-xl border-2 border-transparent hover:scale-105 active:scale-95 transition"
+                    data-color="#5500ff"
+                    style="background-color: #5500ff;"></button>
+            </div>
+
+            <button onclick="closeSkinMenu()"
+                class="w-full py-3 bg-[#20113c] border border-[#2d1b54] text-white rounded-xl font-bold hover:bg-[#2d1b54] transition text-sm orbitron tracking-wide">
+                CONFIRM & RETURN
+            </button>
+        </div>
+    </div>
+
     <script src="script.js" defer></script>
 </body>
 
