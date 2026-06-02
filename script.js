@@ -56,9 +56,17 @@ let gameTimer = null;
 let lobbyCountdownVal = -1;
 let lobbyTimerId = null;
 
+// Race Finish Tracking
+let raceStarted = false;
+let firstPlayerFinishTime = -1;
+let raceCountdownVal = -1;
+let raceTimerId = null;
+let finishPositions = []; // Tracks [1st place player, 2nd place player, 3rd place player]
+
 // Player Pool Matrix (Max 6 Players)
 let localPlayerId = "";
 let players = {};
+let readyPlayers = {}; // Track which players are ready at the start door
 const playerColors = ['#00f2fe', '#ff007f', '#00ff66', '#ffff00', '#ff9900', '#a020f0'];
 
 // Global slot manager - tracks which players occupy which slots for permanent P-number assignment
@@ -100,6 +108,9 @@ let gems = [];
 
 let particles = [];
 
+// Face image cache for performance
+let faceImageCache = {};
+
 // NEW: Time tracking for frame-rate independence
 let lastTime = 0;
 
@@ -120,6 +131,15 @@ const lobbyDoor = {
     w: 70,
     h: 110,
     color: '#ffcc00'
+};
+
+// Finish Line for Race Mode
+const finishLine = {
+    x: 1150,
+    y: 550,
+    w: 70,
+    h: 80,
+    color: '#00ff66'
 };
 
 // Define your unique pool of player colors globally (Updated to match HTML additions)
@@ -168,11 +188,12 @@ window.addEventListener('mousemove', (e) => {
 // Convert mouse screen coords to canvas world coords
 function getMouseWorldPos() {
     const rect = canvas.getBoundingClientRect();
-    const canvasX = (mousePos.x - rect.left);
-    const canvasY = (mousePos.y - rect.top);
 
-    // Since the context is already transformed by scale and translate,
-    // we need to reverse the camera transform
+    // Normalize mouse position inside the canvas element
+    const canvasX = (mousePos.x - rect.left) * (canvas.width / rect.width);
+    const canvasY = (mousePos.y - rect.top) * (canvas.height / rect.height);
+
+    // Reverse camera transform
     const worldX = canvasX / camera.zoom + camera.x;
     const worldY = canvasY / camera.zoom + camera.y;
 
@@ -215,6 +236,69 @@ function setupActiveMatchEnvironment() {
     ];
 }
 
+// Character Size Multiplier System
+const CHARACTER_BASE_WIDTH = 21;
+const CHARACTER_BASE_HEIGHT = 70;
+let characterSizeMultiplier = 1.0; // Default: 1.0x (can be adjusted 0.5x to 2.0x)
+
+/**
+ * Apply size multiplier to character dimensions and position
+ * Adjusts width, height, and position while maintaining center point
+ */
+function applyCharacterSizeMultiplier(multiplier) {
+    characterSizeMultiplier = Math.max(0.5, Math.min(2.0, multiplier)); // Clamp between 0.5x - 2.0x
+
+    // Update all existing players with new dimensions
+    Object.values(players).forEach(player => {
+        updatePlayerDimensions(player, characterSizeMultiplier);
+    });
+}
+
+/**
+ * Update a player's dimensions and recalculate position based on multiplier
+ * Keeps the character's center point stable
+ */
+function updatePlayerDimensions(player, multiplier) {
+    const oldWidth = player.width;
+    const oldHeight = player.height;
+    const oldCenterX = player.x + oldWidth / 2;
+
+    // Apply multiplier to base dimensions
+    player.width = CHARACTER_BASE_WIDTH * multiplier;
+    player.height = CHARACTER_BASE_HEIGHT * multiplier;
+
+    // Recenter the player to maintain position
+    player.x = oldCenterX - player.width / 2;
+
+    // Clamp position to canvas bounds
+    if (player.x + player.width > 1260) player.x = 1260 - player.width;
+    if (player.x < 20) player.x = 20;
+}
+
+/**
+ * Get scaled hitbox for collision detection
+ * Returns adjusted dimensions that scale with character size
+ */
+function getPlayerHitbox(player) {
+    return {
+        x: player.x,
+        y: player.y,
+        width: player.width,
+        height: player.height,
+        centerX: player.x + player.width / 2,
+        centerY: player.y + player.height / 2,
+        radius: player.width / 2 // For distance calculations
+    };
+}
+
+/**
+ * Scale position adjustments based on character size
+ * Useful for particles, indicators, and UI elements
+ */
+function getScaledOffset(baseOffset) {
+    return baseOffset * characterSizeMultiplier;
+}
+
 // Multiplayer P2P Mesh Engine
 let peer = null;
 const defaultColor = (typeof skinDoor !== 'undefined' && skinDoor.color) ? skinDoor.color : null;
@@ -227,8 +311,8 @@ function createPlayerProfile(id, nameTag) {
         y: 530,
         vx: 0,
         vy: 0,
-        width: 20,
-        height: 48,
+        width: CHARACTER_BASE_WIDTH * characterSizeMultiplier,
+        height: CHARACTER_BASE_HEIGHT * characterSizeMultiplier,
         color: (defaultColor && !isColorAlreadyUsed(defaultColor, null)) ? defaultColor : getNextAvailableColor(),
         isGrounded: false,
         facingRight: true,
@@ -239,7 +323,8 @@ function createPlayerProfile(id, nameTag) {
         dashTimer: 0,
         isDashing: false,
         wasDashPressed: false,
-        lastSeen: Date.now() // Heartbeat tracking
+        lastSeen: Date.now(), // Heartbeat tracking
+        sizeMultiplier: characterSizeMultiplier // Track individual multiplier
     };
 }
 
@@ -358,13 +443,30 @@ function setupHostRoutingRules(conn) {
         players[newClientId] = createPlayerProfile(newClientId, assignedNameTag);
         updateHudDisplays();
 
+        // 1. Send welcome configuration packet to the new client
         conn.send({
             type: 'init_welcome',
-            payload: { assignedId: newClientId, allPlayers: players, mode: currentEngineMode }
+            payload: { assignedId: newClientId, allPlayers: players, mode: currentEngineMode, readyPlayers: readyPlayers }
         });
 
+        // 2. Sync global map layout and player statuses across all existing rooms
         broadcastToRoom('sync_map', { platforms, hazards, gems });
         broadcastToRoom('sync_players', { allPlayers: players });
+        broadcastToRoom('sync_ready_players', { readyPlayers: readyPlayers });
+
+        // === NEW: Pass face data of all existing players to this new player ===
+        Object.keys(players).forEach(id => {
+            // Only fetch for other players (including "HOST"), skipping the new player themselves
+            if (id !== newClientId) {
+                const faceData = localStorage.getItem('playerFaceDrawing_' + id);
+                if (faceData) {
+                    conn.send({
+                        type: 'sync_face_drawing',
+                        payload: { playerId: id, faceData: faceData }
+                    });
+                }
+            }
+        });
     });
 
     conn.on('data', (package) => {
@@ -376,13 +478,16 @@ function setupHostRoutingRules(conn) {
             if (players[package.senderId]) {
                 players[package.senderId].x = package.payload.x;
                 players[package.senderId].y = package.payload.y;
+                players[package.senderId].vx = package.payload.vx;
+                players[package.senderId].vy = package.payload.vy;
+                players[package.senderId].isGrounded = package.payload.isGrounded;
                 players[package.senderId].facingRight = package.payload.facingRight;
                 players[package.senderId].isDashing = package.payload.isDashing;
                 players[package.senderId].handAngle = package.payload.handAngle;
                 players[package.senderId].lastSeen = Date.now();
             }
             broadcastToRoom('sync_players', { allPlayers: players });
-        }else if (package.type === 'update_skin') {
+        } else if (package.type === 'update_skin') {
             if (players[package.senderId]) {
                 players[package.senderId].color = package.payload.color;
             }
@@ -393,6 +498,24 @@ function setupHostRoutingRules(conn) {
             }
         } else if (package.type === 'request_collect_gem') {
             processGemCapture(package.payload.gemId, package.senderId);
+        } else if (package.type === 'player_ready_toggle') {
+            const playerId = package.senderId;
+            const isReady = package.payload.isReady;
+            if (isReady) {
+                readyPlayers[playerId] = true;
+            } else {
+                delete readyPlayers[playerId];
+            }
+            // Broadcast updated ready status to all clients
+            broadcastToRoom('sync_ready_players', { readyPlayers: readyPlayers });
+        } else if (package.type === 'update_face_drawing') {
+            // Receive face drawing from client and broadcast to all players
+            const faceData = package.payload.faceData;
+            const playerId = package.senderId;
+            localStorage.setItem('playerFaceDrawing_' + playerId, faceData);
+            localStorage.setItem('playerHasCustomFace_' + playerId, 'true');
+            // Broadcast to all clients
+            broadcastToRoom('sync_face_drawing', { playerId: playerId, faceData: faceData });
         }
     });
 
@@ -400,6 +523,7 @@ function setupHostRoutingRules(conn) {
         releaseSlot(conn.peer);
         clientConnections = clientConnections.filter(c => c !== conn);
         delete players[conn.peer];
+        delete readyPlayers[conn.peer]; // Clean up ready status when player leaves
         updateHudDisplays();
         broadcastToRoom('sync_players', { allPlayers: players });
     });
@@ -418,6 +542,7 @@ function setupClientRoutingRules(conn) {
                 currentEngineMode = package.payload.mode;
                 document.getElementById('hud-room').innerText = roomCodeString;
                 enterLobbyState();
+                readyPlayers = package.payload.readyPlayers || {}; // Set AFTER enterLobbyState to avoid being cleared
                 startClientHeartbeat(conn); // Start sending heartbeats to host
                 break;
             case 'sync_players':
@@ -425,17 +550,20 @@ function setupClientRoutingRules(conn) {
                 for (let id in package.payload.allPlayers) {
                     if (id !== localPlayerId) {
                         if (!players[id]) {
-                            // NEW: If the player doesn't exist in our local registry yet, register them!
                             players[id] = package.payload.allPlayers[id];
                         } else {
-                            // If they do exist, update their moving properties smoothly
                             players[id].x = package.payload.allPlayers[id].x;
                             players[id].y = package.payload.allPlayers[id].y;
+                            players[id].vx = package.payload.allPlayers[id].vx;
+                            players[id].vy = package.payload.allPlayers[id].vy;
+                            players[id].isGrounded = package.payload.allPlayers[id].isGrounded;
                             players[id].facingRight = package.payload.allPlayers[id].facingRight;
                             players[id].score = package.payload.allPlayers[id].score;
                             players[id].isDashing = package.payload.allPlayers[id].isDashing;
-                            // SYNC COLOR MODIFICATIONS NATIVELY
+                            players[id].handAngle = package.payload.allPlayers[id].handAngle; // ensure handAngle sync
                             players[id].color = package.payload.allPlayers[id].color;
+                            players[id].finished = package.payload.allPlayers[id].finished;
+                            players[id].finishTime = package.payload.allPlayers[id].finishTime;
                         }
                     }
                 }
@@ -458,6 +586,15 @@ function setupClientRoutingRules(conn) {
             case 'sync_lobby_countdown':
                 lobbyCountdownVal = package.payload.value;
                 break;
+            case 'sync_ready_players':
+                readyPlayers = package.payload.readyPlayers;
+                break;
+            case 'sync_face_drawing':
+                const facePlayerId = package.payload.playerId;
+                const faceData = package.payload.faceData;
+                localStorage.setItem('playerFaceDrawing_' + facePlayerId, faceData);
+                localStorage.setItem('playerHasCustomFace_' + facePlayerId, 'true');
+                break;
             case 'trigger_match_start':
                 executeActiveMatchStart();
                 break;
@@ -470,6 +607,13 @@ function setupClientRoutingRules(conn) {
                 break;
             case 'return_to_lobby':
                 executeLobbyReturnSequence();
+                break;
+            case 'sync_race_start':
+                raceCountdownVal = package.payload.raceCountdownVal;
+                firstPlayerFinishTime = Date.now();
+                break;
+            case 'sync_race_countdown':
+                raceCountdownVal = package.payload.value;
                 break;
         }
     });
@@ -512,6 +656,14 @@ function updateHudDisplays() {
 function enterLobbyState() {
     currentEngineMode = 'LOBBY';
     lobbyCountdownVal = -1;
+    readyPlayers = {}; // Clear ready status when entering lobby
+    
+    // Reset race variables
+    raceStarted = false;
+    firstPlayerFinishTime = -1;
+    raceCountdownVal = -1;
+    finishPositions = [];
+    
     if (lobbyTimerId) clearInterval(lobbyTimerId);
     document.getElementById('menu-screen').classList.add('hidden');
     setupLobbyEnvironment();
@@ -522,15 +674,10 @@ function evaluateLobbyDoorTrigger() {
     if (!isHost || currentEngineMode !== 'LOBBY') return;
 
     const totalPlayers = Object.keys(players).length;
-    let touchingCount = 0;
+    const readyCount = Object.keys(readyPlayers).length;
 
-    for (let id in players) {
-        if (checkCollision(players[id], lobbyDoor)) {
-            touchingCount++;
-        }
-    }
-
-    if (totalPlayers >= 2 && touchingCount > totalPlayers / 2) {
+    // Check if more than half of the players are ready
+    if (totalPlayers >= 2 && readyCount > totalPlayers / 2) {
         if (lobbyCountdownVal === -1) {
             lobbyCountdownVal = 10;
             playSound('door');
@@ -546,14 +693,10 @@ function evaluateLobbyDoorTrigger() {
                 }
 
                 let currentTotal = Object.keys(players).length;
-                let currentTouching = 0;
-                for (let id in players) {
-                    if (checkCollision(players[id], lobbyDoor)) {
-                        currentTouching++;
-                    }
-                }
+                let currentReady = Object.keys(readyPlayers).length;
 
-                if (currentTotal >= 2 && currentTouching > currentTotal / 2) {
+                // Continue countdown if more than half are still ready
+                if (currentTotal >= 2 && currentReady > currentTotal / 2) {
                     lobbyCountdownVal--;
                     broadcastToRoom('sync_lobby_countdown', { value: lobbyCountdownVal });
 
@@ -566,6 +709,7 @@ function evaluateLobbyDoorTrigger() {
                         executeActiveMatchStart();
                     }
                 } else {
+                    // Stop countdown if condition no longer met
                     clearInterval(lobbyTimerId);
                     lobbyTimerId = null;
                     lobbyCountdownVal = -1;
@@ -574,6 +718,7 @@ function evaluateLobbyDoorTrigger() {
             }, 1000);
         }
     } else {
+        // Stop countdown if condition no longer met
         if (lobbyCountdownVal !== -1) {
             if (lobbyTimerId) clearInterval(lobbyTimerId);
             lobbyTimerId = null;
@@ -595,8 +740,15 @@ function getTouchingDoorCount() {
 
 function executeActiveMatchStart() {
     currentEngineMode = 'GAME';
+    readyPlayers = {}; // Clear ready status when starting the match
     setupActiveMatchEnvironment();
     updateHudDisplays();
+
+    // Initialize race tracking
+    raceStarted = true;
+    firstPlayerFinishTime = -1;
+    raceCountdownVal = -1;
+    finishPositions = [];
 
     let idx = 0;
     for (let id in players) {
@@ -604,6 +756,8 @@ function executeActiveMatchStart() {
         players[id].y = 400;
         players[id].vx = 0;
         players[id].vy = 0;
+        players[id].finished = false;
+        players[id].finishTime = -1;
         idx++;
     }
 
@@ -617,14 +771,70 @@ function executeActiveMatchStart() {
 
             if (timerVal <= 0) {
                 clearInterval(gameTimer);
-                let results = [];
-                for (let id in players) {
-                    results.push({ id: id, score: players[id].score });
+                // If race countdown hasn't finished, auto-end
+                if (raceCountdownVal !== -1) {
+                    if (raceTimerId) clearInterval(raceTimerId);
+                    raceTimerId = null;
+                    let results = [];
+                    for (let id in players) {
+                        results.push({ id: id, nameTag: players[id].nameTag, score: players[id].score });
+                    }
+                    broadcastToRoom('match_over', { summary: results });
+                    executeMatchEndingSequence(results);
                 }
-                broadcastToRoom('match_over', { summary: results });
-                executeMatchEndingSequence(results);
             }
         }, 1000);
+    }
+}
+
+function checkAndProcessRaceFinish() {
+    if (!isHost || currentEngineMode !== 'GAME' || !raceStarted) return;
+
+    for (let id in players) {
+        const player = players[id];
+        if (player.finished || !checkCollision(player, finishLine)) continue;
+
+        // Mark player as finished
+        player.finished = true;
+        player.finishTime = Date.now();
+        finishPositions.push(id);
+
+        // If this is the first finisher, start the 30-second countdown
+        if (firstPlayerFinishTime === -1) {
+            firstPlayerFinishTime = Date.now();
+            raceCountdownVal = 30;
+            playSound('door');
+            broadcastToRoom('sync_race_start', { raceCountdownVal: raceCountdownVal });
+
+            if (raceTimerId) clearInterval(raceTimerId);
+            raceTimerId = setInterval(() => {
+                raceCountdownVal--;
+                broadcastToRoom('sync_race_countdown', { value: raceCountdownVal });
+
+                if (raceCountdownVal <= 0) {
+                    clearInterval(raceTimerId);
+                    raceTimerId = null;
+                    
+                    // Award points based on finish position
+                    let points = [3, 2, 1]; // 1st, 2nd, 3rd
+                    for (let i = 0; i < Math.min(finishPositions.length, 3); i++) {
+                        if (players[finishPositions[i]]) {
+                            players[finishPositions[i]].score += points[i];
+                        }
+                    }
+
+                    // End the match
+                    if (gameTimer) clearInterval(gameTimer);
+                    gameTimer = null;
+                    let results = [];
+                    for (let id in players) {
+                        results.push({ id: id, nameTag: players[id].nameTag, score: players[id].score, position: finishPositions.indexOf(id) + 1 || -1 });
+                    }
+                    broadcastToRoom('match_over', { summary: results });
+                    executeMatchEndingSequence(results);
+                }
+            }, 1000);
+        }
     }
 }
 
@@ -634,7 +844,20 @@ function executeMatchEndingSequence(summary) {
     overlay.classList.remove('hidden');
 
     summary.sort((a, b) => b.score - a.score);
-    resText.innerText = `最高分玩家: ${summary[0].id} (${summary[0].score} 分)`;
+    let resultText = "🏁 比賽結束\n";
+    resultText += summary.slice(0, 3).map((s, i) => {
+        const medals = ['🥇', '🥈', '🥉'];
+        return `${medals[i]} ${s.nameTag}: ${s.score} 分`;
+    }).join('\n');
+    
+    resText.innerText = resultText;
+
+    // Auto return to lobby after 5 seconds
+    if (isHost) {
+        setTimeout(() => {
+            backToInteractiveLobby();
+        }, 5000);
+    }
 }
 
 function backToInteractiveLobby() {
@@ -756,7 +979,7 @@ function updateCharacterPhysics(player, dt) {
 
     if (jumpJustPressed) {
         if (player.isGrounded) {
-            player.vy = -9;
+            player.vy = -6;
             player.isGrounded = false;
             player.jumpsLeft = 1;
             playSound('jump');
@@ -1180,7 +1403,37 @@ function drawCanvasLevelLayout() {
         ctx.fill();
     });
 
-    if (currentEngineMode === 'LOBBY') {
+    if (currentEngineMode === 'GAME') {
+        // Draw finish line with animated flag effect
+        const time = Date.now() * 0.001;
+        const flagWave = Math.sin(time * 3) * 8;
+        
+        // Finish line base (green)
+        ctx.fillStyle = '#00ff66';
+        ctx.fillRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
+        ctx.strokeStyle = '#00cc44';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
+        
+        // Flag pole
+        ctx.fillStyle = '#ffff00';
+        ctx.fillRect(finishLine.x + finishLine.w / 2 - 2, finishLine.y - 30, 4, 30);
+        
+        // Animated flag
+        ctx.fillStyle = '#ff007f';
+        ctx.beginPath();
+        ctx.moveTo(finishLine.x + finishLine.w / 2 + 2, finishLine.y - 20);
+        ctx.lineTo(finishLine.x + finishLine.w / 2 + 20 + flagWave, finishLine.y - 25);
+        ctx.lineTo(finishLine.x + finishLine.w / 2 + 20 + flagWave, finishLine.y - 10);
+        ctx.closePath();
+        ctx.fill();
+        
+        // Draw "FINISH" text on the line
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 12px "Orbitron"';
+        ctx.textAlign = 'center';
+        ctx.fillText('FINISH', finishLine.x + finishLine.w / 2, finishLine.y + finishLine.h / 2 + 3);
+    } else if (currentEngineMode === 'LOBBY') {
         ctx.shadowColor = skinDoor.color;
         ctx.shadowBlur = 15;
         ctx.fillStyle = '#1c0515';
@@ -1203,24 +1456,64 @@ function drawCanvasLevelLayout() {
         ctx.lineWidth = 4;
         ctx.strokeRect(lobbyDoor.x, lobbyDoor.y, lobbyDoor.w, lobbyDoor.h);
         ctx.shadowBlur = 0;
-
-        if (lobbyCountdownVal >= 0) {
-            ctx.fillStyle = '#ff007f';
-            ctx.font = 'bold 36px "Orbitron"';
-            ctx.textAlign = 'center';
-            ctx.shadowColor = '#ff007f';
-            ctx.shadowBlur = 15;
-            ctx.fillText(`MATCH STARTING IN: ${lobbyCountdownVal}s`, canvas.width / 2, 60);
-            ctx.shadowBlur = 0;
-        }
+        
+        // Draw scoreboard in lobby
+        drawLobbyScoreboard();
     }
+}
+
+function drawLobbyScoreboard() {
+    const scoreboardX = 50;
+    const scoreboardY = 50;
+    const scoreboardW = 250;
+    const scoreboardH = 200;
+    
+    // Background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(scoreboardX, scoreboardY, scoreboardW, scoreboardH);
+    
+    // Border
+    ctx.strokeStyle = '#00f2fe';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(scoreboardX, scoreboardY, scoreboardW, scoreboardH);
+    
+    // Title
+    ctx.fillStyle = '#00f2fe';
+    ctx.font = 'bold 14px "Orbitron"';
+    ctx.textAlign = 'left';
+    ctx.fillText('📊 STANDINGS', scoreboardX + 10, scoreboardY + 25);
+    
+    // Sort players by score
+    const sortedPlayers = Object.values(players).sort((a, b) => b.score - a.score);
+    
+    // Draw player scores
+    ctx.font = '12px "Orbitron"';
+    sortedPlayers.slice(0, 5).forEach((player, index) => {
+        const y = scoreboardY + 45 + (index * 30);
+        
+        // Player color dot
+        ctx.fillStyle = player.color;
+        ctx.beginPath();
+        ctx.arc(scoreboardX + 15, y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Player name
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(`${player.nameTag}:`, scoreboardX + 30, y + 4);
+        
+        // Score
+        ctx.fillStyle = '#ffff00';
+        ctx.textAlign = 'right';
+        ctx.fillText(`${player.score}pt`, scoreboardX + scoreboardW - 15, y + 4);
+        ctx.textAlign = 'left';
+    });
 }
 
 // Calculate hand angle for a player looking at cursor
 function calculateHandAngle(player) {
     const handPivotX = player.x + player.width * 0.5;
-    const handPivotY = player.y + player.height * 0.2;
-    
+    const handPivotY = player.y + 32;
+
     const mouseWorld = getMouseWorldPos();
     const dx = mouseWorld.x - handPivotX;
     const dy = mouseWorld.y - handPivotY;
@@ -1249,92 +1542,219 @@ function calculateHandAngle(player) {
 }
 
 function drawCharacterModel(pModel) {
-    // 1. Calculate squish factor based on movement state (squash when grounded, stretch when airborne)
-    let squishY = pModel.isGrounded ? 0 : 5;
+    // Visual / outline settings
+    const OUTLINE_WIDTH = 3;
+    const OUTLINE_COLOR = 'rgba(255,255,255,0.8)';
 
-    // OUTLINE EFFECT: Draw darker outline around character (works with any shape)
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-    const outlineSize = 1.5;
-    // Draw offset copies to create outline glow
-    for (let ox = -outlineSize; ox <= outlineSize; ox++) {
-        for (let oy = -outlineSize; oy <= outlineSize; oy++) {
-            if (ox === 0 && oy === 0) continue; // Skip center (will be filled normally)
-            ctx.fillRect(pModel.x + ox, pModel.y + squishY + oy, pModel.width, pModel.height - squishY);
+    // Visual split
+    const bodyVisualRatio = 0.58;
+    const bodyVisualHeight = Math.max(12, Math.round(pModel.height * bodyVisualRatio));
+
+    // Body geometry
+    const bodyX = pModel.x;
+    const bodyY = pModel.y + 10;
+    const bodyW = pModel.width;
+    const bodyH = bodyVisualHeight;
+
+    // Leg setup
+    const hipY = bodyY + bodyH - 2; // Kept tuck fix from before
+    const hipCenterX = pModel.x + pModel.width / 2;
+    const LEG_SPREAD = 1;
+    const HIP_OFFSET_X = Math.max(4, Math.round(pModel.width * 0.22 * LEG_SPREAD));
+
+    // Landscape leg dimensions
+    const LANDSCAPE_LEG_HEIGHT = 22;
+    const LANDSCAPE_LEG_WIDTH = 6;
+
+    // Animation constants
+    const now = Date.now();
+    const LEG_SWING_SPEED = 0.012;
+    const LEG_SWING_AMP = 0.6;
+
+    // Directional Jump Angles
+    const JUMP_TUCK_RIGHT = 0.3;
+    const JUMP_TUCK_LEFT = -0.3;
+    const DOUBLE_JUMP_TUCK_RIGHT = 0.45; // Exaggerated turn for double jump right
+    const DOUBLE_JUMP_TUCK_LEFT = -0.45; // Exaggerated turn for double jump left
+    const FALL_STRETCH_RIGHT = 0.1;
+    const FALL_STRETCH_LEFT = -0.1;
+
+    let leftLegAngle = 0;
+    let rightLegAngle = 0;
+
+    // Determine direction (fallback to velocity if facingRight isn't explicitly set)
+    const isFacingRight = pModel.facingRight !== undefined ? pModel.facingRight : (pModel.vx >= 0);
+    const animateLocally = (pModel.id === localPlayerId);
+
+    // --- SYSTEM CONSOLIDATED ANIMATION ENGINE ---
+    if (pModel.isGrounded) {
+        const isWalking = Math.abs(pModel.vx) > 0.15;
+
+        if (isWalking) {
+            // WALKING ANIMATION (Applies to both Client & Remote Players)
+            let phase = Math.sin(now * LEG_SWING_SPEED);
+            // Local player scales with actual MOVE_SPEED config, remote handles fallback smoothly
+            const maxSpeedRef = animateLocally ? MOVE_SPEED : Math.max(0.15, Math.abs(pModel.vx));
+            const speedFactor = Math.min(Math.abs(pModel.vx) / maxSpeedRef, 1);
+            const swing = LEG_SWING_AMP * speedFactor * phase;
+
+            // Flip swing phases naturally based on moving direction
+            if (pModel.vx < -0.01) {
+                leftLegAngle = -swing;
+                rightLegAngle = swing;
+            } else {
+                leftLegAngle = swing;
+                rightLegAngle = -swing;
+            }
+        } else {
+            // IDLE ANIMATION
+            if (animateLocally) {
+                // Subtle breathing sway for local client player
+                const idleSway = Math.sin(now * 0.004) * 0.06;
+                leftLegAngle = idleSway;
+                rightLegAngle = -idleSway;
+            } else {
+                // Standing static for remote network players to save performance
+                leftLegAngle = 0;
+                rightLegAngle = 0;
+            }
+        }
+    } else {
+        // AIRBORNE ANIMATION (Jumping / Falling - Direction Dependent)
+        const isRising = pModel.vy < 0;
+
+        const isDoubleJumping = pModel.jumpsLeft === 0;
+
+        if (isFacingRight) {
+            if (isRising) {
+                // Apply the steeper angle if double jumping, otherwise use standard tuck
+                if (isDoubleJumping) {
+                    leftLegAngle = DOUBLE_JUMP_TUCK_RIGHT;
+                    rightLegAngle = DOUBLE_JUMP_TUCK_RIGHT - 1.2;
+                }
+                else {
+                    leftLegAngle = rightLegAngle = JUMP_TUCK_RIGHT;
+                }
+            } else {
+                leftLegAngle = rightLegAngle = FALL_STRETCH_RIGHT;
+            }
+        } else {
+            if (isRising) {
+                // Apply the steeper angle if double jumping, otherwise use standard tuck
+                if (isDoubleJumping) {
+                    leftLegAngle = DOUBLE_JUMP_TUCK_LEFT + 1.2;
+                    rightLegAngle = DOUBLE_JUMP_TUCK_LEFT;
+                }
+                else {
+                    leftLegAngle = rightLegAngle = JUMP_TUCK_LEFT;
+                }
+            } else {
+                leftLegAngle = rightLegAngle = FALL_STRETCH_LEFT;
+            }
         }
     }
 
-    // 2. Draw the player with squash/stretch effect (main body)
+    // LAYER 1: Draw legs completely underneath everything else
+    const drawLeg = (angle, offsetX) => {
+        ctx.save();
+        ctx.translate(hipCenterX + offsetX, hipY);
+        ctx.rotate(Math.PI / 2 + angle);
+        ctx.fillStyle = pModel.color;
+        ctx.lineWidth = OUTLINE_WIDTH;
+        ctx.strokeStyle = OUTLINE_COLOR;
+
+        ctx.fillRect(0, -LANDSCAPE_LEG_WIDTH / 2, LANDSCAPE_LEG_HEIGHT, LANDSCAPE_LEG_WIDTH);
+        ctx.strokeRect(0, -LANDSCAPE_LEG_WIDTH / 2, LANDSCAPE_LEG_HEIGHT, LANDSCAPE_LEG_WIDTH);
+
+        ctx.restore();
+    };
+
+    drawLeg(leftLegAngle, -HIP_OFFSET_X);
+    drawLeg(rightLegAngle, HIP_OFFSET_X);
+
+    // LAYER 2: Draw body fill (Cleans leg tops)
     ctx.fillStyle = pModel.color;
-    ctx.fillRect(pModel.x, pModel.y + squishY, pModel.width, pModel.height - squishY);
+    ctx.fillRect(bodyX, bodyY, bodyW, bodyH);
 
-    // 3. Draw head (circle above the body)
-    const headRadius = pModel.width / 1.5;
+    // LAYER 3: Draw body outline
+    ctx.lineWidth = OUTLINE_WIDTH;
+    ctx.strokeStyle = OUTLINE_COLOR;
+    ctx.strokeRect(bodyX, bodyY, bodyW, bodyH);
+
+    // LAYER 4: Head
+    const headRadius = pModel.width / 1.4;
     const headCenterX = pModel.x + pModel.width / 2;
-    const headCenterY = pModel.y - 10;
+    const headCenterY = pModel.y + 20;
 
-    // Head outline
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-    for (let i = 0; i < 3; i++) {
-        ctx.beginPath();
-        ctx.arc(headCenterX, headCenterY, headRadius + i * 0.5, 0, Math.PI * 2);
-        ctx.fill();
-    }
-
-    // Head main
     ctx.fillStyle = pModel.color;
     ctx.beginPath();
     ctx.arc(headCenterX, headCenterY, headRadius, 0, Math.PI * 2);
     ctx.fill();
+    ctx.lineWidth = OUTLINE_WIDTH;
+    ctx.strokeStyle = OUTLINE_COLOR;
+    ctx.stroke();
 
-    // 5. Draw hand (rectangle) - use synchronized hand angle for all players
-    const handPivotX = pModel.x + pModel.width * 0.5;
-    const handPivotY = pModel.y + pModel.height * 0.2;
-    
-    // For local player, calculate hand angle in real-time based on cursor
-    // For other players, use the synchronized hand angle
-    let handAngle;
-    if (pModel.id === localPlayerId) {
-        handAngle = calculateHandAngle(pModel);
-    } else {
-        handAngle = pModel.handAngle !== undefined ? pModel.handAngle : (pModel.facingRight ? 0 : Math.PI);
+    // LAYER 4.5: Draw custom face if exists
+    const hasCustomFace = localStorage.getItem('playerHasCustomFace_' + pModel.id) === 'true';
+    if (hasCustomFace) {
+        const savedFaceData = localStorage.getItem('playerFaceDrawing_' + pModel.id);
+        if (savedFaceData) {
+            // Load from cache or create new Image
+            if (!faceImageCache[pModel.id] || faceImageCache[pModel.id].src !== savedFaceData) {
+                faceImageCache[pModel.id] = new Image();
+                faceImageCache[pModel.id].src = savedFaceData;
+            }
+
+            const faceImg = faceImageCache[pModel.id];
+            if (faceImg.complete) { // Image is already loaded
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(headCenterX, headCenterY, headRadius, 0, Math.PI * 2);
+                ctx.clip();
+
+                // Draw face image scaled to head size
+                const faceSize = headRadius * 2 * 0.95;
+                ctx.drawImage(faceImg,
+                    headCenterX - faceSize / 2,
+                    headCenterY - faceSize / 2,
+                    faceSize,
+                    faceSize);
+                ctx.restore();
+            }
+        }
     }
 
-    // Draw hand
+    // LAYER 5: Arms (Aiming logic)
+    const handPivotX = pModel.x + pModel.width * 0.5;
+    const handPivotY = pModel.y + (bodyH * 0.22) + 30;
+    const handAngle = (pModel.id === localPlayerId)
+        ? calculateHandAngle(pModel)
+        : (pModel.handAngle !== undefined ? pModel.handAngle : (isFacingRight ? 0 : Math.PI));
+
     ctx.save();
     ctx.translate(handPivotX, handPivotY);
     ctx.rotate(handAngle);
-
-    // Draw hand outline
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-    ctx.fillRect(-1, -4, 20, 8);
-
-    // Draw hand main
     ctx.fillStyle = pModel.color;
+
     ctx.fillRect(0, -3, 18, 6);
+    ctx.lineWidth = OUTLINE_WIDTH;
+    ctx.strokeStyle = OUTLINE_COLOR;
+    ctx.strokeRect(0, -3, 18, 6);
 
-    // Optional finger/point
-    ctx.fillStyle = pModel.color;
     ctx.beginPath();
-    ctx.moveTo(18, -5);
-    ctx.lineTo(26, 0);
-    ctx.lineTo(18, 5);
-    ctx.closePath();
+    ctx.arc(24, 0, 6, 0, Math.PI * 2);
     ctx.fill();
-
-    ctx.globalAlpha = 1;
+    ctx.stroke();
     ctx.restore();
 
-    // 6. Draw nametag and score
+    // LAYER 6: UI / Nametag
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
     ctx.font = '10px monospace';
     ctx.textAlign = 'center';
     let labelStr = pModel.nameTag || 'P?';
-    if (pModel.id === localPlayerId) {
-        labelStr += ' (YOU)';
-    }
-    ctx.fillText(labelStr, pModel.x + pModel.width / 2, pModel.y - 30);
+    if (pModel.id === localPlayerId) labelStr += ' (YOU)';
+    ctx.fillText(labelStr, pModel.x + pModel.width / 2, pModel.y - 20);
 
-    // 7. Spawn dust particles when landing (squishY = 0 means grounded)
     if (pModel.isGrounded && pModel.vy > 5 && !pModel.isDashing) {
         spawnDustParticles(pModel.x, pModel.y + pModel.height);
     }
@@ -1418,10 +1838,10 @@ function drawOffscreenRadarIndicators() {
 
 // NEW: Draw a custom, private neon dash cooldown indicator above the character
 function drawDashCooldownBar(p) {
-    const barWidth = p.width + 20;       // Match the width of your character
+    const barWidth = p.width + 10;       // Match the width of your character
     const barHeight = 3;            // Thickness of the bar
-    const x = p.x - 10;
-    const y = p.y - 24;             // Floats 24 pixels directly above the character's head
+    const x = p.x - 5;
+    const y = p.y - 12;             // Floats 24 pixels directly above the character's head
 
     // 1. Draw the semi-transparent dark background track frame
     ctx.fillStyle = 'rgba(11, 6, 18, 0.7)';
@@ -1521,13 +1941,37 @@ function drawStartDoorUI() {
     // Draw "Start" label above the door (always visible)
     ctx.fillText("Start", doorCenterX, doorCenterY - 20);
 
-    // Display countdown indicator instead of interaction prompt
-    const doorDisplayY = doorCenterY + lobbyDoor.h / 2;
-    const touchingCount = getTouchingDoorCount();
-    const totalPlayers = Object.keys(players).length;
+    // Draw "[F] | Ready" prompt at the door center (only when colliding)
+    const localPlayer = players[localPlayerId];
+    if (localPlayer && checkCollision(localPlayer, lobbyDoor)) {
+        ctx.fillText("[F] | Ready", doorCenterX, doorCenterY + lobbyDoor.h / 2);
 
+        // Handle interaction
+        if (keys.Interact) {
+            // Toggle ready status
+            if (readyPlayers[localPlayerId]) {
+                delete readyPlayers[localPlayerId];
+            } else {
+                readyPlayers[localPlayerId] = true;
+            }
+            keys.Interact = false;
+
+            // Broadcast ready status to host if this is a client
+            if (!isHost && hostConnection && hostConnection.open) {
+                hostConnection.send({
+                    type: 'player_ready_toggle',
+                    senderId: localPlayerId,
+                    payload: { isReady: readyPlayers[localPlayerId] ? true : false }
+                });
+            }
+        }
+    }
+
+    // Show ready count at the bottom
+    const totalPlayers = Object.keys(players).length;
+    const readyCount = Object.keys(readyPlayers).length;
     ctx.font = '16px "Orbitron"';
-    ctx.fillText(`${touchingCount}/${totalPlayers}`, doorCenterX, doorDisplayY);
+    ctx.fillText(`Ready: ${readyCount}/${totalPlayers}`, doorCenterX, doorCenterY - lobbyDoor.h / 2 - 15);
 }
 
 // Updated to accept the browser's high-resolution timestamp
@@ -1555,23 +1999,33 @@ function enginePipelineTick(timestamp) {
             // Resolve player-to-player collisions
             resolvePlayerCollisions();
 
+            // Check for race finish in GAME mode
+            if (currentEngineMode === 'GAME' && isHost) {
+                checkAndProcessRaceFinish();
+            }
+
             if (isHost) {
                 evaluateLobbyDoorTrigger();
                 // Update local player's hand angle for sync
                 localPlayer.handAngle = calculateHandAngle(localPlayer);
                 broadcastToRoom('sync_players', { allPlayers: players });
             } else {
+                // inside enginePipelineTick, where client sends input to host
                 hostConnection.send({
                     type: 'client_input_update',
                     senderId: localPlayerId,
                     payload: {
                         x: localPlayer.x,
                         y: localPlayer.y,
+                        vx: localPlayer.vx,
+                        vy: localPlayer.vy,
+                        isGrounded: localPlayer.isGrounded,
                         facingRight: localPlayer.facingRight,
                         isDashing: localPlayer.isDashing,
                         handAngle: calculateHandAngle(localPlayer)
                     }
                 });
+
             }
 
             // Camera calculations naturally adjust with smooth interpolation
@@ -1634,6 +2088,28 @@ function enginePipelineTick(timestamp) {
         ctx.restore();
 
         drawOffscreenRadarIndicators();
+
+        // Draw countdown in screen space (not affected by camera transforms)
+        if (lobbyCountdownVal >= 0) {
+            ctx.fillStyle = '#ff007f';
+            ctx.font = 'bold 36px "Orbitron"';
+            ctx.textAlign = 'center';
+            ctx.shadowColor = '#ff007f';
+            ctx.shadowBlur = 15;
+            ctx.fillText(`MATCH STARTING IN: ${lobbyCountdownVal}s`, canvas.width / 2, 60);
+            ctx.shadowBlur = 0;
+        }
+
+        // Draw race countdown in screen space
+        if (raceCountdownVal > 0 && currentEngineMode === 'GAME') {
+            ctx.fillStyle = '#00ff66';
+            ctx.font = 'bold 48px "Orbitron"';
+            ctx.textAlign = 'center';
+            ctx.shadowColor = '#00ff66';
+            ctx.shadowBlur = 20;
+            ctx.fillText(`${raceCountdownVal}s`, canvas.width / 2, canvas.height / 2);
+            ctx.shadowBlur = 0;
+        }
 
     } else {
         ctx.fillStyle = '#110924';
@@ -1848,6 +2324,159 @@ function openSkinMenu() {
 function closeSkinMenu() {
     document.getElementById('skin-modal').classList.add('hidden');
 }
+
+// ===== FACE DRAWING FUNCTIONALITY =====
+let faceDrawingCanvas = null;
+let faceDrawingCtx = null;
+let isDrawing = false;
+let currentDrawColor = '#FFFFFF';
+let currentBrushSize = 3;
+let faceImageData = null;
+
+function initializeFaceCanvas() {
+    faceDrawingCanvas = document.getElementById('faceDrawingCanvas');
+    faceDrawingCtx = faceDrawingCanvas.getContext('2d');
+
+    // Load saved face if exists
+    const savedFace = localStorage.getItem('playerFaceDrawing_' + localPlayerId);
+    if (savedFace) {
+        const img = new Image();
+        img.onload = () => {
+            faceDrawingCtx.drawImage(img, 0, 0);
+            faceImageData = faceDrawingCtx.getImageData(0, 0, faceDrawingCanvas.width, faceDrawingCanvas.height);
+        };
+        img.src = savedFace;
+    } else {
+        // Initialize blank canvas with circle background
+        drawFaceCanvasBackground();
+    }
+
+    // Draw event listeners
+    faceDrawingCanvas.addEventListener('mousedown', (e) => {
+        isDrawing = true;
+        const rect = faceDrawingCanvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        // Check if click is within circle
+        const centerX = faceDrawingCanvas.width / 2;
+        const centerY = faceDrawingCanvas.height / 2;
+        const radius = faceDrawingCanvas.width / 2;
+        const distance = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
+
+        if (distance <= radius) {
+            faceDrawingCtx.beginPath();
+            faceDrawingCtx.moveTo(x, y);
+        }
+    });
+
+    faceDrawingCanvas.addEventListener('mousemove', (e) => {
+        if (!isDrawing) return;
+
+        const rect = faceDrawingCanvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        // Check if within circle
+        const centerX = faceDrawingCanvas.width / 2;
+        const centerY = faceDrawingCanvas.height / 2;
+        const radius = faceDrawingCanvas.width / 2;
+        const distance = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
+
+        if (distance <= radius) {
+            faceDrawingCtx.lineTo(x, y);
+            faceDrawingCtx.strokeStyle = currentDrawColor;
+            faceDrawingCtx.lineWidth = currentBrushSize;
+            faceDrawingCtx.lineCap = 'round';
+            faceDrawingCtx.lineJoin = 'round';
+            faceDrawingCtx.stroke();
+        }
+    });
+
+    faceDrawingCanvas.addEventListener('mouseup', () => {
+        isDrawing = false;
+    });
+
+    faceDrawingCanvas.addEventListener('mouseleave', () => {
+        isDrawing = false;
+    });
+}
+
+function drawFaceCanvasBackground() {
+    // Dynamically fetch the local player's color, fallback to default if not loaded
+    const characterColor = (players && players[localPlayerId]) ? players[localPlayerId].color : '#0c0516';
+
+    // Clear canvas with character color
+    faceDrawingCtx.fillStyle = characterColor;
+    faceDrawingCtx.fillRect(0, 0, faceDrawingCanvas.width, faceDrawingCanvas.height);
+
+    // Draw circle outline
+    faceDrawingCtx.strokeStyle = '#ffffff';
+    faceDrawingCtx.lineWidth = 2;
+    faceDrawingCtx.beginPath();
+    faceDrawingCtx.arc(faceDrawingCanvas.width / 2, faceDrawingCanvas.height / 2, faceDrawingCanvas.width / 2 - 2, 0, Math.PI * 2);
+    faceDrawingCtx.stroke();
+}
+
+function setDrawColor(color) {
+    currentDrawColor = color;
+}
+
+function setBrushSize(size) {
+    currentBrushSize = parseInt(size);
+}
+
+function resetFaceDrawing() {
+    drawFaceCanvasBackground();
+    faceImageData = null;
+}
+
+function saveFaceDrawing() {
+    // Save canvas as image data
+    const imageData = faceDrawingCanvas.toDataURL('image/png');
+    localStorage.setItem('playerFaceDrawing_' + localPlayerId, imageData);
+
+    // Store reference that face is custom
+    localStorage.setItem('playerHasCustomFace_' + localPlayerId, 'true');
+
+    // Broadcast face drawing to other players
+    if (isHost) {
+        broadcastToRoom('sync_face_drawing', { playerId: localPlayerId, faceData: imageData });
+    } else if (hostConnection && hostConnection.open) {
+        hostConnection.send({
+            type: 'update_face_drawing',
+            senderId: localPlayerId,
+            payload: { faceData: imageData }
+        });
+    }
+
+    closeFaceDrawing();
+    playSound('door'); // Play sound effect
+}
+
+function openFaceDrawing() {
+    document.getElementById('face-drawing-modal').classList.remove('hidden');
+
+    // Initialize canvas after modal is shown
+    setTimeout(() => {
+        if (!faceDrawingCanvas) {
+            initializeFaceCanvas();
+        } else {
+            // If the board was already initialized, refresh the background color 
+            // to match the newly selected character color (if they haven't drawn yet)
+            const hasCustomFace = localStorage.getItem('playerHasCustomFace_' + localPlayerId) === 'true';
+            if (!hasCustomFace) {
+                drawFaceCanvasBackground();
+            }
+        }
+    }, 10);
+}
+
+function closeFaceDrawing() {
+    document.getElementById('face-drawing-modal').classList.add('hidden');
+}
+
+// ===== END FACE DRAWING FUNCTIONALITY =====
 
 // Initialization Start
 enginePipelineTick();
