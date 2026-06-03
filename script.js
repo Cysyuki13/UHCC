@@ -30,6 +30,10 @@ function switchPanel(panelId) {
     document.getElementById(panelId).classList.remove('hidden');
 }
 
+let itemManager = null;
+let localPlayerItem = null;
+let projectiles = [];      // for ammunition
+
 // Framework Engine Constants
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
@@ -107,6 +111,9 @@ let hazards = [];
 let gems = [];
 
 let particles = [];
+let bulletImage = null;
+bulletImage = new Image();
+bulletImage.src = 'assets/items/pistol_bullet.svg';
 
 // Face image cache for performance
 let faceImageCache = {};
@@ -144,18 +151,18 @@ const finishLine = {
 
 // Define your unique pool of player colors globally (Updated to match HTML additions)
 const PLAYER_COLORS = [
-    '#ff007f', // Neon Pink
-    '#00f2fe', // Cyber Cyan
-    '#00ff66', // Neon Green
-    '#ffff00', // Neon Yellow
-    '#9400d3', // Neon Purple
-    '#ffaa00', // Neon Orange
-    '#181717', // Psychedelic Purple
-    '#ff0055', // Cyberpunk Crimson
-    '#ff5500', // Hot Coral
-    '#0011ff', // Electric Lime
-    '#ff97dc', // Laser Pink
-    '#5500ff'  // Deep Violet
+    '#FF0000', // Red
+    '#0000FF', // Blue
+    '#000000', // Black
+    '#ffffff', // White
+    '#FF69B4', // Rose
+    '#00FFFF', // Cyan
+    '#8B4513', // Brown
+    '#FFC0CB', // Pink
+    '#800080', // Purple
+    '#FFA500', // Orange
+    '#808080', // Grey
+    '#63c363'  // Green
 ];
 
 // Helper to find the first color NOT currently in use
@@ -313,7 +320,7 @@ function createPlayerProfile(id, nameTag) {
         vy: 0,
         width: CHARACTER_BASE_WIDTH * characterSizeMultiplier,
         height: CHARACTER_BASE_HEIGHT * characterSizeMultiplier,
-        color: (defaultColor && !isColorAlreadyUsed(defaultColor, null)) ? defaultColor : getNextAvailableColor(),
+        color: getNextAvailableColor(),
         isGrounded: false,
         facingRight: true,
         score: 0,
@@ -324,7 +331,9 @@ function createPlayerProfile(id, nameTag) {
         isDashing: false,
         wasDashPressed: false,
         lastSeen: Date.now(), // Heartbeat tracking
-        sizeMultiplier: characterSizeMultiplier // Track individual multiplier
+        sizeMultiplier: characterSizeMultiplier, // Track individual multiplier
+        itemType: null,   // instead of item: null
+        item: null   // holds the UsableItem instance
     };
 }
 
@@ -349,6 +358,14 @@ function initHost() {
         const hostNameTag = claimSlot(localPlayerId);
         players[localPlayerId] = createPlayerProfile(localPlayerId, hostNameTag);
 
+        // After players[localPlayerId] is created
+        itemManager = new ItemManager();
+        // Spawn a pistol in the lobby at a specific position
+        if (isHost) {
+            // Spawn at a good location, e.g., near the left side
+            itemManager.spawnItem(300, 580, 'pistol');
+        }
+
         enterLobbyState();
         startHostWatchdog(); // Start monitoring for dead connections
     });
@@ -366,6 +383,17 @@ function initHost() {
     });
 }
 
+let lastProjectileSnapshot = null;
+
+function broadcastProjectiles() {
+    if (!isHost) return;
+    // Only broadcast if projectiles array changed
+    const snapshot = JSON.stringify(projectiles);
+    if (snapshot === lastProjectileSnapshot) return;
+    lastProjectileSnapshot = snapshot;
+    broadcastToRoom('sync_projectiles', { projectiles: projectiles });
+}
+
 function initGuest() {
     const code = document.getElementById('room-input').value.trim();
     if (!/^[0-9]{4}$/.test(code)) return;
@@ -377,6 +405,8 @@ function initGuest() {
     peer.on('open', (id) => {
         localPlayerId = id;
         hostConnection = peer.connect(`neon-uhub-${roomCodeString}`);
+        // Create itemManager for the client
+        itemManager = new ItemManager();
         setupClientRoutingRules(hostConnection);
     });
 
@@ -443,20 +473,35 @@ function setupHostRoutingRules(conn) {
         players[newClientId] = createPlayerProfile(newClientId, assignedNameTag);
         updateHudDisplays();
 
-        // 1. Send welcome configuration packet to the new client
+        // Create a safe version of players without the 'item' property
+        const safePlayers = {};
+        for (let id in players) {
+            safePlayers[id] = { ...players[id] };
+            delete safePlayers[id].item;
+        }
+
+        // 1. Send welcome configuration packet (ONLY the safe version)
         conn.send({
             type: 'init_welcome',
-            payload: { assignedId: newClientId, allPlayers: players, mode: currentEngineMode, readyPlayers: readyPlayers }
+            payload: { assignedId: newClientId, allPlayers: safePlayers, mode: currentEngineMode, readyPlayers: readyPlayers }
         });
 
         // 2. Sync global map layout and player statuses across all existing rooms
         broadcastToRoom('sync_map', { platforms, hazards, gems });
-        broadcastToRoom('sync_players', { allPlayers: players });
+        broadcastToRoom('sync_players', { allPlayers: players });   // sanitized inside broadcastToRoom
         broadcastToRoom('sync_ready_players', { readyPlayers: readyPlayers });
 
-        // === NEW: Pass face data of all existing players to this new player ===
+        // 3. Send current world items to the new client
+        if (itemManager) {
+            const itemsData = itemManager.worldItems.map(item => ({
+                x: item.x, y: item.y, itemType: item.itemType,
+                isAvailable: item.isAvailable, respawnTimer: item.respawnTimer
+            }));
+            conn.send({ type: 'sync_world_items', payload: { items: itemsData } });
+        }
+
+        // 4. Pass face data of all existing players to this new player
         Object.keys(players).forEach(id => {
-            // Only fetch for other players (including "HOST"), skipping the new player themselves
             if (id !== newClientId) {
                 const faceData = localStorage.getItem('playerFaceDrawing_' + id);
                 if (faceData) {
@@ -491,7 +536,6 @@ function setupHostRoutingRules(conn) {
             if (players[package.senderId]) {
                 players[package.senderId].color = package.payload.color;
             }
-            // Re-broadcast the updated player data back to the group room immediately
             broadcastToRoom('sync_players', { allPlayers: players });
             if (!document.getElementById('skin-modal').classList.contains('hidden')) {
                 updateColorButtonStates();
@@ -506,16 +550,53 @@ function setupHostRoutingRules(conn) {
             } else {
                 delete readyPlayers[playerId];
             }
-            // Broadcast updated ready status to all clients
             broadcastToRoom('sync_ready_players', { readyPlayers: readyPlayers });
         } else if (package.type === 'update_face_drawing') {
-            // Receive face drawing from client and broadcast to all players
             const faceData = package.payload.faceData;
             const playerId = package.senderId;
             localStorage.setItem('playerFaceDrawing_' + playerId, faceData);
             localStorage.setItem('playerHasCustomFace_' + playerId, 'true');
-            // Broadcast to all clients
             broadcastToRoom('sync_face_drawing', { playerId: playerId, faceData: faceData });
+        } else if (package.type === 'request_pickup_item') {
+            const playerId = package.senderId;
+            const player = players[playerId];
+            if (player && itemManager) {
+                const pickedItem = itemManager.checkPickup(player);
+                if (pickedItem) {
+                    players[playerId].item = pickedItem;
+                    players[playerId].itemType = 'pistol';
+                    broadcastToRoom('sync_players', { allPlayers: players });
+                    broadcastWorldItems();
+                }
+            }
+        } else if (package.type === 'client_shoot') {
+            const playerId = package.senderId;
+            const player = players[playerId];
+            if (player && package.payload.handAngle !== undefined) {
+                // Host creates the projectile on behalf of the client
+                const handX = player.x + player.width * 0.5;
+                const handY = player.y + 32;
+                const angle = package.payload.handAngle;
+                const dirX = Math.cos(angle);
+                const dirY = Math.sin(angle);
+                const spawnX = handX + dirX * 20;
+                const spawnY = handY + dirY * 20;
+
+                const projectile = {
+                    x: spawnX,
+                    y: spawnY,
+                    vx: dirX * 12,
+                    vy: dirY * 12,
+                    radius: 6,
+                    life: 120,
+                    ownerId: playerId,
+                    type: 'pistol_ammo',
+                    knockback: 8
+                };
+                projectiles.push(projectile);
+                broadcastProjectiles();
+                playSound('door');
+            }
         }
     });
 
@@ -523,7 +604,7 @@ function setupHostRoutingRules(conn) {
         releaseSlot(conn.peer);
         clientConnections = clientConnections.filter(c => c !== conn);
         delete players[conn.peer];
-        delete readyPlayers[conn.peer]; // Clean up ready status when player leaves
+        delete readyPlayers[conn.peer];
         updateHudDisplays();
         broadcastToRoom('sync_players', { allPlayers: players });
     });
@@ -542,11 +623,26 @@ function setupClientRoutingRules(conn) {
                 currentEngineMode = package.payload.mode;
                 document.getElementById('hud-room').innerText = roomCodeString;
                 enterLobbyState();
-                readyPlayers = package.payload.readyPlayers || {}; // Set AFTER enterLobbyState to avoid being cleared
-                startClientHeartbeat(conn); // Start sending heartbeats to host
+                readyPlayers = package.payload.readyPlayers || {};
+                startClientHeartbeat(conn);
+
+                // Reconstruct UsableItem instances from itemType
+                for (let id in players) {
+                    if (players[id].itemType === 'pistol') {
+                        players[id].item = new pistolItem();
+                    } else {
+                        players[id].item = null;
+                    }
+                }
+                // Update local player's held item reference
+                if (players[localPlayerId] && players[localPlayerId].item) {
+                    localPlayerItem = players[localPlayerId].item;
+                } else {
+                    localPlayerItem = null;
+                }
                 break;
             case 'sync_players':
-                // 1. Add or update players coming from the host broadcast
+                // 1. Update player data from the host
                 for (let id in package.payload.allPlayers) {
                     if (id !== localPlayerId) {
                         if (!players[id]) {
@@ -560,19 +656,41 @@ function setupClientRoutingRules(conn) {
                             players[id].facingRight = package.payload.allPlayers[id].facingRight;
                             players[id].score = package.payload.allPlayers[id].score;
                             players[id].isDashing = package.payload.allPlayers[id].isDashing;
-                            players[id].handAngle = package.payload.allPlayers[id].handAngle; // ensure handAngle sync
+                            players[id].handAngle = package.payload.allPlayers[id].handAngle;
                             players[id].color = package.payload.allPlayers[id].color;
                             players[id].finished = package.payload.allPlayers[id].finished;
                             players[id].finishTime = package.payload.allPlayers[id].finishTime;
+                            players[id].itemType = package.payload.allPlayers[id].itemType; // important
                         }
                     }
                 }
+                // Also update the local player’s own data (except position, which is driven locally)
+                if (package.payload.allPlayers[localPlayerId]) {
+                    players[localPlayerId].score = package.payload.allPlayers[localPlayerId].score;
+                    players[localPlayerId].color = package.payload.allPlayers[localPlayerId].color;
+                    players[localPlayerId].itemType = package.payload.allPlayers[localPlayerId].itemType;
+                    players[localPlayerId].finished = package.payload.allPlayers[localPlayerId].finished;
+                    players[localPlayerId].finishTime = package.payload.allPlayers[localPlayerId].finishTime;
+                    // Do NOT overwrite x,y,vx,vy,handAngle, etc. – those come from local input
+                }
 
-                // 2. NEW: Clean up players who left the room
+                // 2. Reconstruct UsableItem instances from itemType for ALL players
                 for (let id in players) {
-                    if (id !== localPlayerId && !package.payload.allPlayers[id]) {
-                        delete players[id];
+                    if (players[id].itemType === 'pistol') {
+                        // If the existing item is not a pistolItem, create a new one
+                        if (!players[id].item || players[id].item.constructor !== pistolItem) {
+                            players[id].item = new pistolItem();
+                        }
+                    } else {
+                        players[id].item = null;
                     }
+                }
+
+                // 3. Update local player's held item reference (for drawing and shooting)
+                if (players[localPlayerId] && players[localPlayerId].item) {
+                    localPlayerItem = players[localPlayerId].item;
+                } else {
+                    localPlayerItem = null;
                 }
 
                 updateHudDisplays();
@@ -615,6 +733,14 @@ function setupClientRoutingRules(conn) {
             case 'sync_race_countdown':
                 raceCountdownVal = package.payload.value;
                 break;
+            case 'sync_world_items':
+                if (itemManager) {
+                    itemManager.syncFromData(package.payload.items);
+                }
+                break;
+            case 'sync_projectiles':
+                projectiles = package.payload.projectiles;
+                break;
         }
     });
 
@@ -637,7 +763,18 @@ function startClientHeartbeat(conn) {
 
 function broadcastToRoom(type, payload) {
     if (!isHost) return;
-    const msg = { type: type, payload: payload };
+    let msgPayload = payload;
+    // Special handling for sync_players: remove the 'item' property (contains HTMLImageElement)
+    if (type === 'sync_players' && payload.allPlayers) {
+        const safePlayers = {};
+        for (let id in payload.allPlayers) {
+            const p = payload.allPlayers[id];
+            safePlayers[id] = { ...p };
+            delete safePlayers[id].item;   // DO NOT send the item instance
+        }
+        msgPayload = { allPlayers: safePlayers };
+    }
+    const msg = { type: type, payload: msgPayload };
     clientConnections.forEach(conn => {
         if (conn.open) conn.send(msg);
     });
@@ -657,13 +794,13 @@ function enterLobbyState() {
     currentEngineMode = 'LOBBY';
     lobbyCountdownVal = -1;
     readyPlayers = {}; // Clear ready status when entering lobby
-    
+
     // Reset race variables
     raceStarted = false;
     firstPlayerFinishTime = -1;
     raceCountdownVal = -1;
     finishPositions = [];
-    
+
     if (lobbyTimerId) clearInterval(lobbyTimerId);
     document.getElementById('menu-screen').classList.add('hidden');
     setupLobbyEnvironment();
@@ -814,7 +951,7 @@ function checkAndProcessRaceFinish() {
                 if (raceCountdownVal <= 0) {
                     clearInterval(raceTimerId);
                     raceTimerId = null;
-                    
+
                     // Award points based on finish position
                     let points = [3, 2, 1]; // 1st, 2nd, 3rd
                     for (let i = 0; i < Math.min(finishPositions.length, 3); i++) {
@@ -849,7 +986,7 @@ function executeMatchEndingSequence(summary) {
         const medals = ['🥇', '🥈', '🥉'];
         return `${medals[i]} ${s.nameTag}: ${s.score} 分`;
     }).join('\n');
-    
+
     resText.innerText = resultText;
 
     // Auto return to lobby after 5 seconds
@@ -1403,22 +1540,49 @@ function drawCanvasLevelLayout() {
         ctx.fill();
     });
 
+    projectiles.forEach(p => {
+        if (bulletImage && bulletImage.complete) {
+            ctx.save();
+            ctx.translate(p.x, p.y);
+            const angle = Math.atan2(p.vy, p.vx);
+            ctx.rotate(angle);
+            ctx.drawImage(bulletImage, -p.radius, -p.radius, p.radius * 2, p.radius * 2);
+            ctx.restore();
+        } else {
+            // fallback: draw a simple circle if image not ready
+            ctx.fillStyle = '#ffaa44';
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#ff6600';
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.radius - 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    });
+
+    if (itemManager) {
+        for (let wi of itemManager.worldItems) {
+            wi.draw(ctx, itemManager);   // ← pass itemManager here
+        }
+    }
+
     if (currentEngineMode === 'GAME') {
         // Draw finish line with animated flag effect
         const time = Date.now() * 0.001;
         const flagWave = Math.sin(time * 3) * 8;
-        
+
         // Finish line base (green)
         ctx.fillStyle = '#00ff66';
         ctx.fillRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
         ctx.strokeStyle = '#00cc44';
         ctx.lineWidth = 3;
         ctx.strokeRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
-        
+
         // Flag pole
         ctx.fillStyle = '#ffff00';
         ctx.fillRect(finishLine.x + finishLine.w / 2 - 2, finishLine.y - 30, 4, 30);
-        
+
         // Animated flag
         ctx.fillStyle = '#ff007f';
         ctx.beginPath();
@@ -1427,7 +1591,7 @@ function drawCanvasLevelLayout() {
         ctx.lineTo(finishLine.x + finishLine.w / 2 + 20 + flagWave, finishLine.y - 10);
         ctx.closePath();
         ctx.fill();
-        
+
         // Draw "FINISH" text on the line
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 12px "Orbitron"';
@@ -1456,7 +1620,7 @@ function drawCanvasLevelLayout() {
         ctx.lineWidth = 4;
         ctx.strokeRect(lobbyDoor.x, lobbyDoor.y, lobbyDoor.w, lobbyDoor.h);
         ctx.shadowBlur = 0;
-        
+
         // Draw scoreboard in lobby
         drawLobbyScoreboard();
     }
@@ -1467,44 +1631,44 @@ function drawLobbyScoreboard() {
     const scoreboardY = 50;
     const scoreboardW = 250;
     const scoreboardH = 200;
-    
+
     // Background
     ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
     ctx.fillRect(scoreboardX, scoreboardY, scoreboardW, scoreboardH);
-    
+
     // Border
     ctx.strokeStyle = '#00f2fe';
     ctx.lineWidth = 2;
     ctx.strokeRect(scoreboardX, scoreboardY, scoreboardW, scoreboardH);
-    
+
     // Title
     ctx.fillStyle = '#00f2fe';
     ctx.font = 'bold 14px "Orbitron"';
     ctx.textAlign = 'left';
-    ctx.fillText('📊 STANDINGS', scoreboardX + 10, scoreboardY + 25);
-    
+    ctx.fillText('📊 Scoreboard', scoreboardX + 10, scoreboardY + 25);
+
     // Sort players by score
     const sortedPlayers = Object.values(players).sort((a, b) => b.score - a.score);
-    
+
     // Draw player scores
     ctx.font = '12px "Orbitron"';
     sortedPlayers.slice(0, 5).forEach((player, index) => {
         const y = scoreboardY + 45 + (index * 30);
-        
+
         // Player color dot
         ctx.fillStyle = player.color;
         ctx.beginPath();
         ctx.arc(scoreboardX + 15, y, 4, 0, Math.PI * 2);
         ctx.fill();
-        
+
         // Player name
         ctx.fillStyle = '#ffffff';
         ctx.fillText(`${player.nameTag}:`, scoreboardX + 30, y + 4);
-        
+
         // Score
         ctx.fillStyle = '#ffff00';
         ctx.textAlign = 'right';
-        ctx.fillText(`${player.score}pt`, scoreboardX + scoreboardW - 15, y + 4);
+        ctx.fillText(`${player.score} pt`, scoreboardX + scoreboardW - 15, y + 4);
         ctx.textAlign = 'left';
     });
 }
@@ -1541,10 +1705,42 @@ function calculateHandAngle(player) {
     }
 }
 
+// Adaptive outline: dark for light colors, white for dark colors
+function getAdaptiveOutlineColor(hexColor) {
+    // Convert hex to RGB
+    let r, g, b;
+    if (hexColor.startsWith('#')) {
+        r = parseInt(hexColor.slice(1, 3), 16);
+        g = parseInt(hexColor.slice(3, 5), 16);
+        b = parseInt(hexColor.slice(5, 7), 16);
+    } else {
+        // fallback for any non-hex color (shouldn't happen)
+        return 'rgba(255,255,255,0.8)';
+    }
+    // Calculate relative luminance (perceived brightness)
+    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    // If color is light (>0.7), use dark outline; else use white outline
+    return luminance > 0.7 ? 'rgba(0,0,0,0.9)' : 'rgba(255,255,255,0.9)';
+}
+
+function roundedRect(ctx, x, y, w, h, radius) {
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + w - radius, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+    ctx.lineTo(x + w, y + h - radius);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+    ctx.lineTo(x + radius, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+    ctx.closePath();
+}
+
 function drawCharacterModel(pModel) {
     // Visual / outline settings
     const OUTLINE_WIDTH = 3;
-    const OUTLINE_COLOR = 'rgba(255,255,255,0.8)';
+    let OUTLINE_COLOR = getAdaptiveOutlineColor(pModel.color);
 
     // Visual split
     const bodyVisualRatio = 0.58;
@@ -1736,10 +1932,12 @@ function drawCharacterModel(pModel) {
     ctx.rotate(handAngle);
     ctx.fillStyle = pModel.color;
 
-    ctx.fillRect(0, -3, 18, 6);
+    // Draw rounded rectangle arm
+    roundedRect(ctx, 0, -3, 18, 6, 3);
+    ctx.fill();
     ctx.lineWidth = OUTLINE_WIDTH;
     ctx.strokeStyle = OUTLINE_COLOR;
-    ctx.strokeRect(0, -3, 18, 6);
+    ctx.stroke();
 
     ctx.beginPath();
     ctx.arc(24, 0, 6, 0, Math.PI * 2);
@@ -1747,9 +1945,19 @@ function drawCharacterModel(pModel) {
     ctx.stroke();
     ctx.restore();
 
+    // Draw held item if any
+    if (pModel.item) {
+        const handPivotX = pModel.x + pModel.width * 0.5;
+        const handPivotY = pModel.y + (bodyH * 0.22) + 30;
+        const angle = handAngle;
+        const handX = handPivotX + Math.cos(angle) * 24;
+        const handY = handPivotY + Math.sin(angle) * 24;
+        pModel.item.draw(ctx, handX, handY, angle, pModel.facingRight);
+    }
+
     // LAYER 6: UI / Nametag
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.font = '10px monospace';
+    ctx.font = 'bold 10px monospace';
     ctx.textAlign = 'center';
     let labelStr = pModel.nameTag || 'P?';
     if (pModel.id === localPlayerId) labelStr += ' (YOU)';
@@ -1986,7 +2194,7 @@ function enginePipelineTick(timestamp) {
     // Safety Cap: Prevent massive physics glitches/clipping if the browser lags or focus drops
     if (dt > 3.0) dt = 3.0;
 
-    ctx.fillStyle = '#0b0612';
+    ctx.fillStyle = '#24212a';  // lobby color
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     if (currentEngineMode === 'LOBBY' || currentEngineMode === 'GAME') {
@@ -2025,7 +2233,41 @@ function enginePipelineTick(timestamp) {
                         handAngle: calculateHandAngle(localPlayer)
                     }
                 });
+            }
 
+            // Update world items (only needed on host, but we can run locally for visuals)
+            if (itemManager) {
+                itemManager.update(); // update respawn timers (host also runs this)
+
+                // For host: pick up items directly (no network request)
+                if (isHost && localPlayer) {
+                    const pickedItem = itemManager.checkPickup(localPlayer);
+                    if (pickedItem) {
+                        players[localPlayerId].item = pickedItem;
+                        players[localPlayerId].itemType = 'pistol';
+                        localPlayerItem = pickedItem;
+                        broadcastToRoom('sync_players', { allPlayers: players });
+                        broadcastWorldItems();
+                        playSound('gem');
+                    }
+                }
+                // For clients: send request when touching an available item
+                else if (!isHost && localPlayer) {
+                    for (let wi of itemManager.worldItems) {
+                        if (wi.isAvailable && checkCollision(localPlayer, wi)) {
+                            hostConnection.send({
+                                type: 'request_pickup_item',
+                                senderId: localPlayerId
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Update local player's item cooldown
+            if (localPlayerItem) {
+                localPlayerItem.update();
             }
 
             // Camera calculations naturally adjust with smooth interpolation
@@ -2045,6 +2287,42 @@ function enginePipelineTick(timestamp) {
             camera.zoom = 1.0;
             camera.x = 0;
             camera.y = 0;
+        }
+
+        // Update projectiles
+        for (let i = 0; i < projectiles.length; i++) {
+            const p = projectiles[i];
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.life -= dt;
+            if (p.life <= 0) {
+                projectiles.splice(i, 1);
+                i--;
+                continue;
+            }
+
+            // Collision with players (excluding owner)
+            for (let id in players) {
+                if (id === p.ownerId) continue;
+                const target = players[id];
+                const dx = p.x - (target.x + target.width / 2);
+                const dy = p.y - (target.y + target.height / 2);
+                const dist = Math.hypot(dx, dy);
+                if (dist < p.radius + target.width / 2) {
+                    const angle = Math.atan2(p.vy, p.vx);
+                    target.vx += Math.cos(angle) * p.knockback;
+                    target.vy += Math.sin(angle) * p.knockback;
+                    projectiles.splice(i, 1);
+                    i--;
+                    playSound('spike');
+                    break;
+                }
+            }
+        }
+
+        // Broadcast projectiles to all clients (host only)
+        if (isHost) {
+            broadcastProjectiles();
         }
 
         ctx.save();
@@ -2170,6 +2448,33 @@ window.addEventListener('pointerdown', (e) => {
     if (e.button === 1) e.preventDefault();
 });
 
+canvas.addEventListener('mousedown', (e) => {
+    if (currentEngineMode !== 'LOBBY' && currentEngineMode !== 'GAME') return;
+    if (e.button !== 0) return;
+    if (!localPlayerItem) return;
+
+    // Check cooldown locally (but we also send the shoot request)
+    if (!localPlayerItem.canUse()) return;
+
+    if (isHost) {
+        // Host: use locally
+        const used = localPlayerItem.onUse(players[localPlayerId], { projectiles });
+        if (used) playSound('door');
+    } else {
+        // Client: send shoot request to host
+        const angle = calculateHandAngle(players[localPlayerId]);
+        hostConnection.send({
+            type: 'client_shoot',
+            senderId: localPlayerId,
+            payload: { handAngle: angle }
+        });
+        // Immediately apply cooldown locally to prevent spamming
+        localPlayerItem.cooldown = localPlayerItem.cooldownMax;
+        // Optionally play sound locally
+        playSound('door');
+    }
+});
+
 function bindTouchBtn(elementId, action) {
     const el = document.getElementById(elementId);
     if (!el) return;
@@ -2226,6 +2531,16 @@ function selectCharacterColor(hexColor, buttonElement) {
     // their selection border active before they choose to close the menu.
     // closeSkinMenu();
 }
+
+function broadcastWorldItems() {
+    if (!isHost) return;
+    const itemsData = itemManager.worldItems.map(item => ({
+        x: item.x, y: item.y, itemType: item.itemType,
+        isAvailable: item.isAvailable, respawnTimer: item.respawnTimer
+    }));
+    broadcastToRoom('sync_world_items', { items: itemsData });
+}
+
 function isColorAlreadyUsed(hexColor, excludePlayerId) {
     if (!hexColor) return false;
     const cleanHexColor = hexColor.trim().toLowerCase();
@@ -2325,91 +2640,127 @@ function closeSkinMenu() {
     document.getElementById('skin-modal').classList.add('hidden');
 }
 
-// ===== FACE DRAWING FUNCTIONALITY =====
+// ===== FACE DRAWING FUNCTIONALITY =====   
 let faceDrawingCanvas = null;
 let faceDrawingCtx = null;
+let faceOverlayCanvas = null;
+let faceOverlayCtx = null;
 let isDrawing = false;
 let currentDrawColor = '#FFFFFF';
-let currentBrushSize = 3;
+let currentBrushSize = 20;
 let faceImageData = null;
+let eraserActive = false;
+let lastPenColor = '#FFFFFF';       // stores the colour before eraser mode
+let faceCanvasBgColor = '#0c0516';  // background colour used for erasing
 
 function initializeFaceCanvas() {
     faceDrawingCanvas = document.getElementById('faceDrawingCanvas');
     faceDrawingCtx = faceDrawingCanvas.getContext('2d');
 
-    // Load saved face if exists
+    // Create an off‑screen overlay canvas of the same size
+    faceOverlayCanvas = document.createElement('canvas');
+    faceOverlayCanvas.width = faceDrawingCanvas.width;
+    faceOverlayCanvas.height = faceDrawingCanvas.height;
+    faceOverlayCtx = faceOverlayCanvas.getContext('2d');
+
+    // Load saved face drawing onto the overlay, if any
     const savedFace = localStorage.getItem('playerFaceDrawing_' + localPlayerId);
     if (savedFace) {
         const img = new Image();
         img.onload = () => {
-            faceDrawingCtx.drawImage(img, 0, 0);
-            faceImageData = faceDrawingCtx.getImageData(0, 0, faceDrawingCanvas.width, faceDrawingCanvas.height);
+            faceOverlayCtx.drawImage(img, 0, 0);
+            compositeLayers();
         };
         img.src = savedFace;
     } else {
-        // Initialize blank canvas with circle background
-        drawFaceCanvasBackground();
+        // start with a clean overlay
+        faceOverlayCtx.clearRect(0, 0, faceOverlayCanvas.width, faceOverlayCanvas.height);
+        compositeLayers();
     }
 
-    // Draw event listeners
-    faceDrawingCanvas.addEventListener('mousedown', (e) => {
+    // Draw the static background (character color + circle outline)
+    drawFaceCanvasBackground();
+
+    // Drawing event listeners (now draw on the overlay)
+    let isDrawing = false;
+
+    function getCanvasCoords(e) {
+        const rect = faceDrawingCanvas.getBoundingClientRect();
+        const scaleX = faceDrawingCanvas.width / rect.width;
+        const scaleY = faceDrawingCanvas.height / rect.height;
+        let clientX, clientY;
+        if (e.touches) {
+            clientX = e.touches[0].clientX;
+            clientY = e.touches[0].clientY;
+        } else {
+            clientX = e.clientX;
+            clientY = e.clientY;
+        }
+        const canvasX = (clientX - rect.left) * scaleX;
+        const canvasY = (clientY - rect.top) * scaleY;
+        return { x: Math.max(0, Math.min(canvasX, faceDrawingCanvas.width)), y: Math.max(0, Math.min(canvasY, faceDrawingCanvas.height)) };
+    }
+
+    function startDrawing(e) {
+        e.preventDefault();
         isDrawing = true;
-        const rect = faceDrawingCanvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
+        const { x, y } = getCanvasCoords(e);
+        faceOverlayCtx.beginPath();
+        faceOverlayCtx.moveTo(x, y);
+        // Apply current drawing mode (pen or eraser)
+        applyDrawingMode();
+    }
 
-        // Check if click is within circle
-        const centerX = faceDrawingCanvas.width / 2;
-        const centerY = faceDrawingCanvas.height / 2;
-        const radius = faceDrawingCanvas.width / 2;
-        const distance = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
-
-        if (distance <= radius) {
-            faceDrawingCtx.beginPath();
-            faceDrawingCtx.moveTo(x, y);
-        }
-    });
-
-    faceDrawingCanvas.addEventListener('mousemove', (e) => {
+    function draw(e) {
         if (!isDrawing) return;
+        e.preventDefault();
+        const { x, y } = getCanvasCoords(e);
+        faceOverlayCtx.lineTo(x, y);
+        faceOverlayCtx.stroke();
+        compositeLayers();
+    }
 
-        const rect = faceDrawingCanvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
+    function stopDrawing() {
+        isDrawing = false;
+        faceOverlayCtx.beginPath();
+    }
 
-        // Check if within circle
-        const centerX = faceDrawingCanvas.width / 2;
-        const centerY = faceDrawingCanvas.height / 2;
-        const radius = faceDrawingCanvas.width / 2;
-        const distance = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
-
-        if (distance <= radius) {
-            faceDrawingCtx.lineTo(x, y);
-            faceDrawingCtx.strokeStyle = currentDrawColor;
-            faceDrawingCtx.lineWidth = currentBrushSize;
-            faceDrawingCtx.lineCap = 'round';
-            faceDrawingCtx.lineJoin = 'round';
-            faceDrawingCtx.stroke();
+    function applyDrawingMode() {
+        if (eraserActive) {
+            faceOverlayCtx.globalCompositeOperation = 'destination-out';
+            faceOverlayCtx.strokeStyle = 'rgba(0,0,0,1)'; // color doesn't matter, destination-out ignores it
+        } else {
+            faceOverlayCtx.globalCompositeOperation = 'source-over';
+            faceOverlayCtx.strokeStyle = currentDrawColor;
         }
-    });
+        faceOverlayCtx.lineWidth = currentBrushSize;
+        faceOverlayCtx.lineCap = 'round';
+        faceOverlayCtx.lineJoin = 'round';
+    }
 
-    faceDrawingCanvas.addEventListener('mouseup', () => {
-        isDrawing = false;
-    });
+    // Add event listeners for mouse and touch
+    faceDrawingCanvas.addEventListener('mousedown', startDrawing);
+    faceDrawingCanvas.addEventListener('mousemove', draw);
+    faceDrawingCanvas.addEventListener('mouseup', stopDrawing);
+    faceDrawingCanvas.addEventListener('mouseleave', stopDrawing);
+    faceDrawingCanvas.addEventListener('touchstart', startDrawing);
+    faceDrawingCanvas.addEventListener('touchmove', draw);
+    faceDrawingCanvas.addEventListener('touchend', stopDrawing);
+}
 
-    faceDrawingCanvas.addEventListener('mouseleave', () => {
-        isDrawing = false;
-    });
+function compositeLayers() {
+    if (!faceDrawingCtx || !faceOverlayCtx) return;
+    // Clear main canvas and draw background
+    drawFaceCanvasBackground();
+    // Draw overlay on top
+    faceDrawingCtx.drawImage(faceOverlayCanvas, 0, 0);
 }
 
 function drawFaceCanvasBackground() {
-    // Dynamically fetch the local player's color, fallback to default if not loaded
+    if (!faceDrawingCtx) return;
     const characterColor = (players && players[localPlayerId]) ? players[localPlayerId].color : '#0c0516';
-
-    // Clear canvas with character color
     faceDrawingCtx.fillStyle = characterColor;
     faceDrawingCtx.fillRect(0, 0, faceDrawingCanvas.width, faceDrawingCanvas.height);
-
     // Draw circle outline
     faceDrawingCtx.strokeStyle = '#ffffff';
     faceDrawingCtx.lineWidth = 2;
@@ -2418,7 +2769,37 @@ function drawFaceCanvasBackground() {
     faceDrawingCtx.stroke();
 }
 
+function toggleEraser() {
+    const eraserBtn = document.getElementById('eraserBtn');
+    if (!eraserActive) {
+        eraserActive = true;
+        lastPenColor = currentDrawColor;
+        if (eraserBtn) {
+            eraserBtn.style.backgroundColor = '#ff007f';
+            eraserBtn.style.color = 'white';
+            eraserBtn.innerText = '✏️ PEN MODE';
+        }
+    } else {
+        deactivateEraser();
+    }
+    // Re‑apply drawing mode for the next stroke
+    if (faceOverlayCtx) applyDrawingMode();
+}
+
+function deactivateEraser() {
+    eraserActive = false;
+    currentDrawColor = lastPenColor;
+    const eraserBtn = document.getElementById('eraserBtn');
+    if (eraserBtn) {
+        eraserBtn.style.backgroundColor = '';
+        eraserBtn.style.color = '#ff007f';
+        eraserBtn.innerText = '🧽 ERASER MODE';
+    }
+    if (faceOverlayCtx) applyDrawingMode();
+}
+
 function setDrawColor(color) {
+    if (eraserActive) deactivateEraser();
     currentDrawColor = color;
 }
 
@@ -2426,20 +2807,51 @@ function setBrushSize(size) {
     currentBrushSize = parseInt(size);
 }
 
+function toggleEraser() {
+    const eraserBtn = document.getElementById('eraserBtn');
+    if (!eraserActive) {
+        // Switch to eraser mode
+        eraserActive = true;
+        lastPenColor = currentDrawColor;
+        currentDrawColor = faceCanvasBgColor;
+        if (eraserBtn) {
+            eraserBtn.style.backgroundColor = '#ff007f';
+            eraserBtn.style.color = 'white';
+            eraserBtn.style.borderColor = '#ff007f';
+            eraserBtn.innerText = '✏️ PEN MODE';
+        }
+    } else {
+        // Switch back to pen mode
+        deactivateEraser();
+    }
+}
+
+function deactivateEraser() {
+    eraserActive = false;
+    currentDrawColor = lastPenColor;
+    const eraserBtn = document.getElementById('eraserBtn');
+    if (eraserBtn) {
+        eraserBtn.style.backgroundColor = '';
+        eraserBtn.style.color = '#ff007f';
+        eraserBtn.style.borderColor = '#ff007f';
+        eraserBtn.innerText = '🧽 ERASER MODE';
+    }
+}
+
 function resetFaceDrawing() {
-    drawFaceCanvasBackground();
-    faceImageData = null;
+    if (faceOverlayCtx) {
+        faceOverlayCtx.clearRect(0, 0, faceOverlayCanvas.width, faceOverlayCanvas.height);
+        compositeLayers();
+    }
 }
 
 function saveFaceDrawing() {
-    // Save canvas as image data
-    const imageData = faceDrawingCanvas.toDataURL('image/png');
+    // Save the overlay canvas data (pen strokes only)
+    const imageData = faceOverlayCanvas.toDataURL('image/png');
     localStorage.setItem('playerFaceDrawing_' + localPlayerId, imageData);
-
-    // Store reference that face is custom
     localStorage.setItem('playerHasCustomFace_' + localPlayerId, 'true');
 
-    // Broadcast face drawing to other players
+    // Broadcast to other players
     if (isHost) {
         broadcastToRoom('sync_face_drawing', { playerId: localPlayerId, faceData: imageData });
     } else if (hostConnection && hostConnection.open) {
@@ -2449,25 +2861,18 @@ function saveFaceDrawing() {
             payload: { faceData: imageData }
         });
     }
-
     closeFaceDrawing();
-    playSound('door'); // Play sound effect
+    playSound('door');
 }
 
 function openFaceDrawing() {
     document.getElementById('face-drawing-modal').classList.remove('hidden');
-
-    // Initialize canvas after modal is shown
     setTimeout(() => {
         if (!faceDrawingCanvas) {
             initializeFaceCanvas();
         } else {
-            // If the board was already initialized, refresh the background color 
-            // to match the newly selected character color (if they haven't drawn yet)
-            const hasCustomFace = localStorage.getItem('playerHasCustomFace_' + localPlayerId) === 'true';
-            if (!hasCustomFace) {
-                drawFaceCanvasBackground();
-            }
+            // Re‑composite to make sure everything is up‑to‑date
+            compositeLayers();
         }
     }, 10);
 }
