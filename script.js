@@ -1,4 +1,7 @@
-// Synthesizer Configuration
+// ============================================================================
+//  SOUND & UI
+// ============================================================================
+
 const synth = new Tone.PolySynth(Tone.Synth).toDestination();
 synth.set({
     oscillator: { type: "square8" },
@@ -22,7 +25,6 @@ window.addEventListener('click', () => {
     if (Tone.context.state !== 'running') Tone.start();
 });
 
-// UI Panel View Switcher
 function switchPanel(panelId) {
     ['panel-main', 'panel-play', 'panel-settings', 'panel-status'].forEach(id => {
         document.getElementById(id).classList.add('hidden');
@@ -30,11 +32,15 @@ function switchPanel(panelId) {
     document.getElementById(panelId).classList.remove('hidden');
 }
 
+// ============================================================================
+//  GLOBALS & CONSTANTS
+// ============================================================================
+
 let itemManager = null;
 let localPlayerItem = null;
-let projectiles = [];      // for ammunition
+let projectiles = [];
+const THROWABLE_GRAVITY = 0.35;
 
-// Framework Engine Constants
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 const BASE_WIDTH = 1280;
@@ -42,172 +48,104 @@ const BASE_HEIGHT = 720;
 canvas.width = BASE_WIDTH;
 canvas.height = BASE_HEIGHT;
 
-// UPDATED PHYSICS CONSTANTS: Floatier gravity and friction handling
 const GRAVITY = 0.35;
 const FRICTION = 0.85;
 const MAX_FALL_SPEED = 10;
 const MOVE_SPEED = 3;
 const DASH_SPEED = 14;
 
-// Ultimate Chicken Horse Architecture Global State Machine
 let currentEngineMode = 'MENU';
 let isHost = false;
 let roomCodeString = "";
 let timerVal = 60;
 let gameTimer = null;
 
-// Lobby Countdown States
 let lobbyCountdownVal = -1;
 let lobbyTimerId = null;
 
-// Race Finish Tracking
 let raceStarted = false;
 let firstPlayerFinishTime = -1;
 let raceCountdownVal = -1;
 let raceTimerId = null;
-let finishPositions = []; // Tracks [1st place player, 2nd place player, 3rd place player]
+let finishPositions = [];
 
-// Player Pool Matrix (Max 6 Players)
 let localPlayerId = "";
 let players = {};
-let readyPlayers = {}; // Track which players are ready at the start door
-const playerColors = ['#00f2fe', '#ff007f', '#00ff66', '#ffff00', '#ff9900', '#a020f0'];
-
-// Global slot manager - tracks which players occupy which slots for permanent P-number assignment
+let readyPlayers = {};
 const MAX_PLAYERS = 6;
-const playerSlots = Array(MAX_PLAYERS).fill(null); // Will store the peerId for each slot
+const playerSlots = Array(MAX_PLAYERS).fill(null);
 
-// Dynamic Customization Door configuration station
-const skinDoor = {
-    x: 220,
-    y: 390,
-    w: 70,
-    h: 110,
-    color: '#ff007f'
-};
+let throwables = [];
+let lastThrowableSnapshot = null;
+let wasDropPressed = false;
 
-// Call this when someone joins to claim the first empty P-number
-function claimSlot(peerId) {
-    for (let i = 0; i < MAX_PLAYERS; i++) {
-        if (playerSlots[i] === null) {
-            playerSlots[i] = peerId;
-            return `P${i + 1}`; // Returns "P1", "P2", etc.
-        }
-    }
-    return "P?"; // Fallback if full
-}
+const skinDoor = { x: 220, y: 390, w: 70, h: 110, color: '#ff007f' };
 
-// Call this when someone leaves to free their slot
-function releaseSlot(peerId) {
-    const index = playerSlots.indexOf(peerId);
-    if (index !== -1) {
-        playerSlots[index] = null;
-    }
-}
-
-// Map Layout Elements
 let platforms = [];
 let hazards = [];
 let gems = [];
 
 let particles = [];
-let bulletImage = null;
-bulletImage = new Image();
+let bulletImage = new Image();
 bulletImage.src = 'assets/items/pistol_bullet.svg';
 
-// Face image cache for performance
 let faceImageCache = {};
-
-// NEW: Time tracking for frame-rate independence
 let lastTime = 0;
 
-// NEW: Camera and Viewport Scaling Configuration
 let camera = {
-    x: 0,
-    y: 0,
-    zoom: 1.0,        // Current interpolated zoom value
-    targetZoom: 1.0,  // Viewport destination zoom value
-    minZoom: 1.0,     // Zoomed all the way out (See full 1280x720 map)
-    maxZoom: 2.5      // Zoomed all the way in close to character
+    x: 0, y: 0, zoom: 1.0, targetZoom: 1.0,
+    minZoom: 1.0, maxZoom: 2.5
 };
 
-// Dynamic Door Object configuration
-const lobbyDoor = {
-    x: 1150,
-    y: 530,
-    w: 70,
-    h: 110,
-    color: '#ffcc00'
-};
+const lobbyDoor = { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' };
+const finishLine = { x: 1150, y: 550, w: 70, h: 80, color: '#00ff66' };
 
-// Finish Line for Race Mode
-const finishLine = {
-    x: 1150,
-    y: 550,
-    w: 70,
-    h: 80,
-    color: '#00ff66'
-};
-
-// Define your unique pool of player colors globally (Updated to match HTML additions)
 const PLAYER_COLORS = [
-    '#FF0000', // Red
-    '#0000FF', // Blue
-    '#000000', // Black
-    '#ffffff', // White
-    '#FF69B4', // Rose
-    '#00FFFF', // Cyan
-    '#8B4513', // Brown
-    '#FFC0CB', // Pink
-    '#800080', // Purple
-    '#FFA500', // Orange
-    '#808080', // Grey
-    '#63c363'  // Green
+    '#FF0000', '#0000FF', '#000000', '#ffffff', '#FF69B4', '#00FFFF',
+    '#8B4513', '#FFC0CB', '#800080', '#FFA500', '#808080', '#63c363'
 ];
 
-// Helper to find the first color NOT currently in use
-function getNextAvailableColor() {
-    for (let color of PLAYER_COLORS) {
-        let isColorTaken = false;
-        for (let id in players) {
-            if (players[id].color === color) {
-                isColorTaken = true;
-                break;
-            }
-        }
-        if (!isColorTaken) return color;
-    }
-    // Fallback: If lobby full, reuse the first color (or handle as you see fit)
-    return PLAYER_COLORS[0];
-}
-
-// Inputs Map
-const keys = { ArrowLeft: false, ArrowRight: false, ArrowUp: false, ShiftLeft: false, Interact: false };
+const keys = { ArrowLeft: false, ArrowRight: false, ArrowUp: false, ShiftLeft: false, Interact: false, Drop: false };
 const touchState = { left: false, right: false, jump: false };
 
-// Mouse tracking
 let mousePos = { x: 0, y: 0 };
 window.addEventListener('mousemove', (e) => {
     mousePos.x = e.clientX;
     mousePos.y = e.clientY;
 });
 
-// Convert mouse screen coords to canvas world coords
 function getMouseWorldPos() {
     const rect = canvas.getBoundingClientRect();
-
-    // Normalize mouse position inside the canvas element
     const canvasX = (mousePos.x - rect.left) * (canvas.width / rect.width);
     const canvasY = (mousePos.y - rect.top) * (canvas.height / rect.height);
-
-    // Reverse camera transform
-    const worldX = canvasX / camera.zoom + camera.x;
-    const worldY = canvasY / camera.zoom + camera.y;
-
-    return { x: worldX, y: worldY };
+    return {
+        x: canvasX / camera.zoom + camera.x,
+        y: canvasY / camera.zoom + camera.y
+    };
 }
 
-// Level Profiles definitions
+function getNextAvailableColor() {
+    for (let color of PLAYER_COLORS) {
+        let taken = false;
+        for (let id in players) if (players[id].color === color) { taken = true; break; }
+        if (!taken) return color;
+    }
+    return PLAYER_COLORS[0];
+}
+
+function claimSlot(peerId) {
+    for (let i = 0; i < MAX_PLAYERS; i++) if (playerSlots[i] === null) { playerSlots[i] = peerId; return `P${i + 1}`; }
+    return "P?";
+}
+function releaseSlot(peerId) {
+    const idx = playerSlots.indexOf(peerId);
+    if (idx !== -1) playerSlots[idx] = null;
+}
+
+// ============================================================================
+//  ENVIRONMENT SETUP
+// ============================================================================
+
 function setupLobbyEnvironment() {
     platforms = [
         { x: 0, y: 640, w: 1280, h: 40 },
@@ -235,7 +173,6 @@ function setupActiveMatchEnvironment() {
         { x: 450, y: 660, w: 380, h: 20 },
         { x: 230, y: 512, w: 80, h: 8 }
     ];
-
     gems = [
         { id: 1, x: 640, y: 320, collected: false },
         { id: 2, x: 250, y: 450, collected: false },
@@ -243,139 +180,194 @@ function setupActiveMatchEnvironment() {
     ];
 }
 
-// Character Size Multiplier System
+// ============================================================================
+//  PLAYER PROFILE & DIMENSIONS
+// ============================================================================
+
 const CHARACTER_BASE_WIDTH = 21;
 const CHARACTER_BASE_HEIGHT = 70;
-let characterSizeMultiplier = 1.0; // Default: 1.0x (can be adjusted 0.5x to 2.0x)
+let characterSizeMultiplier = 1.0;
 
-/**
- * Apply size multiplier to character dimensions and position
- * Adjusts width, height, and position while maintaining center point
- */
-function applyCharacterSizeMultiplier(multiplier) {
-    characterSizeMultiplier = Math.max(0.5, Math.min(2.0, multiplier)); // Clamp between 0.5x - 2.0x
-
-    // Update all existing players with new dimensions
-    Object.values(players).forEach(player => {
-        updatePlayerDimensions(player, characterSizeMultiplier);
-    });
-}
-
-/**
- * Update a player's dimensions and recalculate position based on multiplier
- * Keeps the character's center point stable
- */
 function updatePlayerDimensions(player, multiplier) {
-    const oldWidth = player.width;
-    const oldHeight = player.height;
-    const oldCenterX = player.x + oldWidth / 2;
-
-    // Apply multiplier to base dimensions
+    const oldCenterX = player.x + player.width / 2;
     player.width = CHARACTER_BASE_WIDTH * multiplier;
     player.height = CHARACTER_BASE_HEIGHT * multiplier;
-
-    // Recenter the player to maintain position
     player.x = oldCenterX - player.width / 2;
-
-    // Clamp position to canvas bounds
     if (player.x + player.width > 1260) player.x = 1260 - player.width;
     if (player.x < 20) player.x = 20;
 }
 
-/**
- * Get scaled hitbox for collision detection
- * Returns adjusted dimensions that scale with character size
- */
-function getPlayerHitbox(player) {
-    return {
-        x: player.x,
-        y: player.y,
-        width: player.width,
-        height: player.height,
-        centerX: player.x + player.width / 2,
-        centerY: player.y + player.height / 2,
-        radius: player.width / 2 // For distance calculations
-    };
-}
-
-/**
- * Scale position adjustments based on character size
- * Useful for particles, indicators, and UI elements
- */
-function getScaledOffset(baseOffset) {
-    return baseOffset * characterSizeMultiplier;
-}
-
-// Multiplayer P2P Mesh Engine
-let peer = null;
-const defaultColor = (typeof skinDoor !== 'undefined' && skinDoor.color) ? skinDoor.color : null;
-
 function createPlayerProfile(id, nameTag) {
     return {
-        id: id,
-        nameTag: nameTag, // Permanent P-number like "P1", "P2", etc.
-        x: 640,
-        y: 530,
-        vx: 0,
-        vy: 0,
-        width: CHARACTER_BASE_WIDTH * characterSizeMultiplier,
-        height: CHARACTER_BASE_HEIGHT * characterSizeMultiplier,
+        id: id, nameTag: nameTag,
+        x: 640, y: 530, vx: 0, vy: 0,
+        width: CHARACTER_BASE_WIDTH, height: CHARACTER_BASE_HEIGHT,
         color: getNextAvailableColor(),
-        isGrounded: false,
-        facingRight: true,
-        score: 0,
-        jumpsLeft: 2,
+        isGrounded: false, facingRight: true,
+        score: 0, jumpsLeft: 2,
         wasJumpPressed: false,
-        dashCooldown: 0,
-        dashTimer: 0,
-        isDashing: false,
-        wasDashPressed: false,
-        lastSeen: Date.now(), // Heartbeat tracking
-        sizeMultiplier: characterSizeMultiplier, // Track individual multiplier
-        itemType: null,   // instead of item: null
-        item: null   // holds the UsableItem instance
+        dashCooldown: 0, dashTimer: 0, isDashing: false, wasDashPressed: false,
+        lastSeen: Date.now(),
+        sizeMultiplier: 1,
+        itemType: null, item: null,
+        ammo: 0                 // NEW: ammo field
     };
 }
+
+// ============================================================================
+//  ITEM & THROWABLE HELPERS
+// ============================================================================
+
+function createThrowable(itemType, x, y, vx, vy, ownerId, dropItem = false, ammo = 3) {
+    return {
+        id: Math.random() + Date.now(),
+        itemType, x, y, vx, vy,
+        radius: 12, life: 150,
+        ownerId, angle: 0,
+        angularSpeed: (vx * 0.025) + ((Math.random() - 0.5) * 0.04),
+        dropItem, ammo
+    };
+}
+
+function broadcastThrowables() {
+    if (!isHost) return;
+    const snap = JSON.stringify(throwables);
+    if (snap === lastThrowableSnapshot) return;
+    lastThrowableSnapshot = snap;
+    broadcastToRoom('sync_throwables', { throwables });
+}
+
+// ============================================================================
+//  BREAK PARTICLES (empty pistol drop)
+// ============================================================================
+
+function spawnBreakParticles(x, y) {
+    for (let i = 0; i < 12; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 2 + Math.random() * 3;
+        pushParticle({
+            type: 'spark',
+            x, y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed - 2,
+            life: 0.5 + Math.random() * 0.3, age: 0,
+            size: Math.random() * 3 + 1, radius: 3,
+            bounce: 0.1, friction: 0.95, onGround: false,
+            color: '#ff6600', alpha: 1
+        });
+    }
+    playSound('spike');  // breaking sound
+}
+
+// ============================================================================
+//  DROP & THROW (HOST)
+// ============================================================================
+
+function hostDropItem(playerId) {
+    const player = players[playerId];
+    if (!player || !player.item) return;
+
+    const itemType = player.itemType;
+    if (!itemType) return;
+
+    const ammo = player.item.ammo;
+
+    // Empty pistol → break effect, no item spawned
+    if (ammo === 0) {
+        spawnBreakParticles(player.x + player.width / 2, player.y + player.height / 2);
+        player.item = null;
+        player.itemType = null;
+        player.ammo = 0;
+        if (playerId === localPlayerId) localPlayerItem = null;
+        broadcastToRoom('sync_players', { allPlayers: players });
+        playSound('gem');
+        return;
+    }
+
+    // Non‑empty: create throwable, preserve ammo
+    const handX = player.x + player.width * 0.5;
+    const handY = player.y + 32;
+    const dirX = player.facingRight ? 1 : -1;
+    const throwable = createThrowable(itemType, handX, handY, dirX * 2, -3, playerId, true, ammo);
+    throwables.push(throwable);
+    broadcastThrowables();
+
+    player.item = null;
+    player.itemType = null;
+    player.ammo = 0;
+    if (playerId === localPlayerId) localPlayerItem = null;
+
+    broadcastToRoom('sync_players', { allPlayers: players });
+    playSound('gem');
+}
+
+function hostThrowItem(playerId, angle, power = 14) {
+    const player = players[playerId];
+    if (!player || !player.item) return;
+
+    const itemType = player.itemType;
+    if (!itemType) return;
+
+    const ammo = player.item.ammo;
+
+    const handX = player.x + player.width * 0.5;
+    const handY = player.y + 32;
+    const dirX = Math.cos(angle);
+    const dirY = Math.sin(angle);
+    const spawnX = handX + dirX * 20;
+    const spawnY = handY + dirY * 20;
+    const vx = dirX * power;
+    const vy = dirY * power;
+
+    const throwable = createThrowable(itemType, spawnX, spawnY, vx, vy, playerId, false, ammo);
+    throwables.push(throwable);
+    broadcastThrowables();
+
+    player.item = null;
+    player.itemType = null;
+    player.ammo = 0;
+    if (playerId === localPlayerId) localPlayerItem = null;
+
+    broadcastToRoom('sync_players', { allPlayers: players });
+    playSound('door');
+}
+
+// ============================================================================
+//  NETWORKING – PEERJS
+// ============================================================================
+
+let peer = null;
+let clientConnections = [];
+let hostConnection = null;
+const HEARTBEAT_TIMEOUT = 5000;
+let hostWatchdogTimer = null;
 
 function initHost() {
     switchPanel('panel-status');
     roomCodeString = Math.floor(1000 + Math.random() * 9000).toString();
     peer = new Peer(`neon-uhub-${roomCodeString}`);
 
-    peer.on('open', (id) => {
+    peer.on('open', () => {
         document.getElementById('status-spinner').classList.add('hidden');
         document.getElementById('room-code-display').classList.remove('hidden');
         document.getElementById('room-code').innerText = roomCodeString;
         document.getElementById('hud-room').innerText = roomCodeString;
-
-        // Auto-copy Room ID on host creation click gesture
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(roomCodeString).catch(err => console.warn(err));
-        }
+        if (navigator.clipboard) navigator.clipboard.writeText(roomCodeString).catch(() => { });
 
         isHost = true;
         localPlayerId = "HOST";
-        const hostNameTag = claimSlot(localPlayerId);
-        players[localPlayerId] = createPlayerProfile(localPlayerId, hostNameTag);
+        players[localPlayerId] = createPlayerProfile(localPlayerId, claimSlot(localPlayerId));
 
-        // After players[localPlayerId] is created
         itemManager = new ItemManager();
-        // Spawn a pistol in the lobby at a specific position
-        if (isHost) {
-            // Spawn at a good location, e.g., near the left side
-            itemManager.spawnItem(300, 580, 'pistol');
-        }
+        itemManager.spawnItem(300, 580, 'pistol', 0, true, 3);
 
         enterLobbyState();
-        startHostWatchdog(); // Start monitoring for dead connections
+        startHostWatchdog();
     });
 
     peer.on('connection', (conn) => {
         if (Object.keys(players).length >= 6) {
-            conn.on('open', () => {
-                conn.send({ type: 'room_full' });
-                setTimeout(() => conn.close(), 500);
-            });
+            conn.on('open', () => { conn.send({ type: 'room_full' }); setTimeout(() => conn.close(), 500); });
             return;
         }
         clientConnections.push(conn);
@@ -383,220 +375,153 @@ function initHost() {
     });
 }
 
-let lastProjectileSnapshot = null;
-
-function broadcastProjectiles() {
-    if (!isHost) return;
-    // Only broadcast if projectiles array changed
-    const snapshot = JSON.stringify(projectiles);
-    if (snapshot === lastProjectileSnapshot) return;
-    lastProjectileSnapshot = snapshot;
-    broadcastToRoom('sync_projectiles', { projectiles: projectiles });
+function startHostWatchdog() {
+    if (hostWatchdogTimer) clearInterval(hostWatchdogTimer);
+    hostWatchdogTimer = setInterval(() => {
+        if (!isHost) return;
+        const now = Date.now();
+        for (let id in players) {
+            if (id === localPlayerId) continue;
+            if (now - players[id].lastSeen > HEARTBEAT_TIMEOUT) {
+                cleanupPlayer(id);
+            }
+        }
+    }, 2000);
 }
 
-function initGuest() {
-    const code = document.getElementById('room-input').value.trim();
-    if (!/^[0-9]{4}$/.test(code)) return;
-
-    switchPanel('panel-status');
-    roomCodeString = code;
-    peer = new Peer();
-
-    peer.on('open', (id) => {
-        localPlayerId = id;
-        hostConnection = peer.connect(`neon-uhub-${roomCodeString}`);
-        // Create itemManager for the client
-        itemManager = new ItemManager();
-        setupClientRoutingRules(hostConnection);
-    });
-
-    peer.on('error', () => {
-        alert("找不到目標房間代碼，請確認代碼是否輸入正確。");
-        cancelConnection();
-    });
-}
-
-function cancelConnection() {
-    if (hostConnection) hostConnection.close();
-    clientConnections.forEach(c => c.close());
-    if (peer) peer.destroy();
-    location.reload();
-}
-
-function disconnectGame() {
-    cancelConnection();
-}
-
-let clientConnections = [];
-let hostConnection = null;
-
-// Heartbeat constants and watchdog timer
-const HEARTBEAT_TIMEOUT = 5000; // 5 seconds of silence = disconnected
-let hostWatchdogTimer = null;
-
-// Unified cleanup function for disconnected players
 function cleanupPlayer(peerId) {
     if (players[peerId]) {
-        releaseSlot(peerId); // Free the P1/P2/P3 slot
+        releaseSlot(peerId);
         delete players[peerId];
         updateHudDisplays();
         broadcastToRoom('sync_players', { allPlayers: players });
     }
 }
 
-// Host watchdog: checks for silent players and disconnects them
-function startHostWatchdog() {
-    if (hostWatchdogTimer) clearInterval(hostWatchdogTimer);
-
-    hostWatchdogTimer = setInterval(() => {
-        if (!isHost) return;
-
-        const now = Date.now();
-        for (let peerId in players) {
-            // Ignore the host itself
-            if (peerId === localPlayerId) continue;
-
-            // If the player hasn't checked in for HEARTBEAT_TIMEOUT
-            if (now - players[peerId].lastSeen > HEARTBEAT_TIMEOUT) {
-                console.warn(`Watchdog: Forcibly disconnecting silent player: ${peerId}`);
-                cleanupPlayer(peerId);
-            }
-        }
-    }, 2000); // Check every 2 seconds
-}
-
 function setupHostRoutingRules(conn) {
     conn.on('open', () => {
-        const newClientId = conn.peer;
-        const assignedNameTag = claimSlot(newClientId);
-
-        players[newClientId] = createPlayerProfile(newClientId, assignedNameTag);
+        const newId = conn.peer;
+        players[newId] = createPlayerProfile(newId, claimSlot(newId));
         updateHudDisplays();
 
-        // Create a safe version of players without the 'item' property
+        // send welcome
         const safePlayers = {};
         for (let id in players) {
             safePlayers[id] = { ...players[id] };
             delete safePlayers[id].item;
         }
-
-        // 1. Send welcome configuration packet (ONLY the safe version)
         conn.send({
             type: 'init_welcome',
-            payload: { assignedId: newClientId, allPlayers: safePlayers, mode: currentEngineMode, readyPlayers: readyPlayers }
+            payload: { assignedId: newId, allPlayers: safePlayers, mode: currentEngineMode, readyPlayers }
         });
 
-        // 2. Sync global map layout and player statuses across all existing rooms
         broadcastToRoom('sync_map', { platforms, hazards, gems });
-        broadcastToRoom('sync_players', { allPlayers: players });   // sanitized inside broadcastToRoom
-        broadcastToRoom('sync_ready_players', { readyPlayers: readyPlayers });
+        broadcastToRoom('sync_players', { allPlayers: players });
+        broadcastToRoom('sync_ready_players', { readyPlayers });
 
-        // 3. Send current world items to the new client
         if (itemManager) {
             const itemsData = itemManager.worldItems.map(item => ({
                 x: item.x, y: item.y, itemType: item.itemType,
-                isAvailable: item.isAvailable, respawnTimer: item.respawnTimer
+                isAvailable: item.isAvailable, respawnTimer: item.respawnTimer,
+                pickupDelayTimer: item.pickupDelayTimer, shouldRespawn: item.shouldRespawn,
+                ammo: item.ammo
             }));
             conn.send({ type: 'sync_world_items', payload: { items: itemsData } });
         }
 
-        // 4. Pass face data of all existing players to this new player
-        Object.keys(players).forEach(id => {
-            if (id !== newClientId) {
-                const faceData = localStorage.getItem('playerFaceDrawing_' + id);
-                if (faceData) {
-                    conn.send({
-                        type: 'sync_face_drawing',
-                        payload: { playerId: id, faceData: faceData }
-                    });
-                }
+        for (let id in players) {
+            if (id !== newId) {
+                const face = localStorage.getItem('playerFaceDrawing_' + id);
+                if (face) conn.send({ type: 'sync_face_drawing', payload: { playerId: id, faceData: face } });
             }
-        });
+        }
     });
 
-    conn.on('data', (package) => {
-        if (package.type === 'heartbeat') {
-            if (players[conn.peer]) {
-                players[conn.peer].lastSeen = Date.now();
-            }
-        } else if (package.type === 'client_input_update') {
-            if (players[package.senderId]) {
-                players[package.senderId].x = package.payload.x;
-                players[package.senderId].y = package.payload.y;
-                players[package.senderId].vx = package.payload.vx;
-                players[package.senderId].vy = package.payload.vy;
-                players[package.senderId].isGrounded = package.payload.isGrounded;
-                players[package.senderId].facingRight = package.payload.facingRight;
-                players[package.senderId].isDashing = package.payload.isDashing;
-                players[package.senderId].handAngle = package.payload.handAngle;
-                players[package.senderId].lastSeen = Date.now();
-            }
-            broadcastToRoom('sync_players', { allPlayers: players });
-        } else if (package.type === 'update_skin') {
-            if (players[package.senderId]) {
-                players[package.senderId].color = package.payload.color;
-            }
-            broadcastToRoom('sync_players', { allPlayers: players });
-            if (!document.getElementById('skin-modal').classList.contains('hidden')) {
-                updateColorButtonStates();
-            }
-        } else if (package.type === 'request_collect_gem') {
-            processGemCapture(package.payload.gemId, package.senderId);
-        } else if (package.type === 'player_ready_toggle') {
-            const playerId = package.senderId;
-            const isReady = package.payload.isReady;
-            if (isReady) {
-                readyPlayers[playerId] = true;
-            } else {
-                delete readyPlayers[playerId];
-            }
-            broadcastToRoom('sync_ready_players', { readyPlayers: readyPlayers });
-        } else if (package.type === 'update_face_drawing') {
-            const faceData = package.payload.faceData;
-            const playerId = package.senderId;
-            localStorage.setItem('playerFaceDrawing_' + playerId, faceData);
-            localStorage.setItem('playerHasCustomFace_' + playerId, 'true');
-            broadcastToRoom('sync_face_drawing', { playerId: playerId, faceData: faceData });
-        } else if (package.type === 'request_pickup_item') {
-            const playerId = package.senderId;
-            const player = players[playerId];
-            if (player && itemManager) {
-                const pickedItem = itemManager.checkPickup(player);
-                if (pickedItem) {
-                    players[playerId].item = pickedItem;
-                    players[playerId].itemType = 'pistol';
-                    broadcastToRoom('sync_players', { allPlayers: players });
-                    broadcastWorldItems();
+    conn.on('data', (pkg) => {
+        const sender = conn.peer;
+        switch (pkg.type) {
+            case 'heartbeat':
+                if (players[sender]) players[sender].lastSeen = Date.now();
+                break;
+            case 'client_input_update':
+                if (players[pkg.senderId]) {
+                    const pl = players[pkg.senderId];
+                    pl.x = pkg.payload.x; pl.y = pkg.payload.y;
+                    pl.vx = pkg.payload.vx; pl.vy = pkg.payload.vy;
+                    pl.isGrounded = pkg.payload.isGrounded;
+                    pl.facingRight = pkg.payload.facingRight;
+                    pl.isDashing = pkg.payload.isDashing;
+                    pl.handAngle = pkg.payload.handAngle;
+                    pl.lastSeen = Date.now();
                 }
-            }
-        } else if (package.type === 'client_shoot') {
-            const playerId = package.senderId;
-            const player = players[playerId];
-            if (player && package.payload.handAngle !== undefined) {
-                // Host creates the projectile on behalf of the client
-                const handX = player.x + player.width * 0.5;
-                const handY = player.y + 32;
-                const angle = package.payload.handAngle;
-                const dirX = Math.cos(angle);
-                const dirY = Math.sin(angle);
-                const spawnX = handX + dirX * 20;
-                const spawnY = handY + dirY * 20;
-
-                const projectile = {
-                    x: spawnX,
-                    y: spawnY,
-                    vx: dirX * 12,
-                    vy: dirY * 12,
-                    radius: 6,
-                    life: 120,
-                    ownerId: playerId,
-                    type: 'pistol_ammo',
-                    knockback: 8
-                };
-                projectiles.push(projectile);
-                broadcastProjectiles();
-                playSound('door');
-            }
+                broadcastToRoom('sync_players', { allPlayers: players });
+                break;
+            case 'update_skin':
+                if (players[pkg.senderId]) players[pkg.senderId].color = pkg.payload.color;
+                broadcastToRoom('sync_players', { allPlayers: players });
+                if (!document.getElementById('skin-modal').classList.contains('hidden')) updateColorButtonStates();
+                break;
+            case 'request_collect_gem':
+                processGemCapture(pkg.payload.gemId, pkg.senderId);
+                break;
+            case 'player_ready_toggle':
+                if (pkg.payload.isReady) readyPlayers[pkg.senderId] = true;
+                else delete readyPlayers[pkg.senderId];
+                broadcastToRoom('sync_ready_players', { readyPlayers });
+                break;
+            case 'update_face_drawing':
+                localStorage.setItem('playerFaceDrawing_' + pkg.senderId, pkg.payload.faceData);
+                localStorage.setItem('playerHasCustomFace_' + pkg.senderId, 'true');
+                broadcastToRoom('sync_face_drawing', { playerId: pkg.senderId, faceData: pkg.payload.faceData });
+                break;
+            case 'request_pickup_item':
+                if (players[pkg.senderId] && itemManager) {
+                    const picked = itemManager.checkPickup(players[pkg.senderId]);
+                    if (picked) {
+                        players[pkg.senderId].item = picked;
+                        players[pkg.senderId].itemType = 'pistol';
+                        players[pkg.senderId].ammo = picked.ammo;
+                        broadcastToRoom('sync_players', { allPlayers: players });
+                        broadcastWorldItems();
+                    }
+                }
+                break;
+            case 'client_shoot':
+                if (players[pkg.senderId] && pkg.payload.handAngle !== undefined) {
+                    const player = players[pkg.senderId];
+                    // Update ammo from client
+                    if (pkg.payload.ammo !== undefined) {
+                        if (player.item) player.item.ammo = pkg.payload.ammo;
+                        player.ammo = pkg.payload.ammo;
+                    }
+                    const handX = player.x + player.width / 2;
+                    const handY = player.y + 32;
+                    const angle = pkg.payload.handAngle;
+                    const dirX = Math.cos(angle);
+                    const dirY = Math.sin(angle);
+                    const spawnX = handX + dirX * 20;
+                    const spawnY = handY + dirY * 20;
+                    const projectile = {
+                        x: spawnX, y: spawnY,
+                        vx: dirX * 12, vy: dirY * 12,
+                        radius: 6, life: 120,
+                        ownerId: pkg.senderId,
+                        type: 'pistol_ammo',
+                        knockback: 15
+                    };
+                    projectiles.push(projectile);
+                    broadcastProjectiles();
+                    playSound('door');
+                    broadcastToRoom('sync_players', { allPlayers: players });
+                }
+                break;
+            case 'request_drop_item':
+                if (players[pkg.senderId]) hostDropItem(pkg.senderId);
+                break;
+            case 'request_throw_item':
+                if (players[pkg.senderId] && players[pkg.senderId].item)
+                    hostThrowItem(pkg.senderId, pkg.payload.angle);
+                break;
         }
     });
 
@@ -610,180 +535,166 @@ function setupHostRoutingRules(conn) {
     });
 }
 
+function initGuest() {
+    const code = document.getElementById('room-input').value.trim();
+    if (!/^[0-9]{4}$/.test(code)) return;
+    switchPanel('panel-status');
+    roomCodeString = code;
+    peer = new Peer();
+    peer.on('open', (id) => {
+        localPlayerId = id;
+        hostConnection = peer.connect(`neon-uhub-${roomCodeString}`);
+        itemManager = new ItemManager();
+        setupClientRoutingRules(hostConnection);
+    });
+    peer.on('error', () => { alert("找不到目標房間代碼"); cancelConnection(); });
+}
+
 function setupClientRoutingRules(conn) {
-    conn.on('data', (package) => {
-        switch (package.type) {
-            case 'room_full':
-                alert("房間已滿 (上限 6 人)！");
-                cancelConnection();
-                break;
+    conn.on('data', (pkg) => {
+        switch (pkg.type) {
+            case 'room_full': alert("房間已滿 (上限 6 人)！"); cancelConnection(); break;
             case 'init_welcome':
-                localPlayerId = package.payload.assignedId;
-                players = package.payload.allPlayers;
-                currentEngineMode = package.payload.mode;
+                localPlayerId = pkg.payload.assignedId;
+                players = pkg.payload.allPlayers;
+                currentEngineMode = pkg.payload.mode;
                 document.getElementById('hud-room').innerText = roomCodeString;
                 enterLobbyState();
-                readyPlayers = package.payload.readyPlayers || {};
+                readyPlayers = pkg.payload.readyPlayers || {};
                 startClientHeartbeat(conn);
 
-                // Reconstruct UsableItem instances from itemType
                 for (let id in players) {
                     if (players[id].itemType === 'pistol') {
-                        players[id].item = new pistolItem();
+                        players[id].item = new pistolItem(players[id].ammo || 3);
                     } else {
                         players[id].item = null;
                     }
                 }
-                // Update local player's held item reference
-                if (players[localPlayerId] && players[localPlayerId].item) {
-                    localPlayerItem = players[localPlayerId].item;
-                } else {
-                    localPlayerItem = null;
-                }
+                if (players[localPlayerId] && players[localPlayerId].item) localPlayerItem = players[localPlayerId].item;
+                else localPlayerItem = null;
                 break;
             case 'sync_players':
-                // 1. Update player data from the host
-                for (let id in package.payload.allPlayers) {
+                for (let id in pkg.payload.allPlayers) {
+                    const data = pkg.payload.allPlayers[id];
                     if (id !== localPlayerId) {
-                        if (!players[id]) {
-                            players[id] = package.payload.allPlayers[id];
-                        } else {
-                            players[id].x = package.payload.allPlayers[id].x;
-                            players[id].y = package.payload.allPlayers[id].y;
-                            players[id].vx = package.payload.allPlayers[id].vx;
-                            players[id].vy = package.payload.allPlayers[id].vy;
-                            players[id].isGrounded = package.payload.allPlayers[id].isGrounded;
-                            players[id].facingRight = package.payload.allPlayers[id].facingRight;
-                            players[id].score = package.payload.allPlayers[id].score;
-                            players[id].isDashing = package.payload.allPlayers[id].isDashing;
-                            players[id].handAngle = package.payload.allPlayers[id].handAngle;
-                            players[id].color = package.payload.allPlayers[id].color;
-                            players[id].finished = package.payload.allPlayers[id].finished;
-                            players[id].finishTime = package.payload.allPlayers[id].finishTime;
-                            players[id].itemType = package.payload.allPlayers[id].itemType; // important
+                        if (!players[id]) players[id] = data;
+                        else {
+                            players[id].x = data.x; players[id].y = data.y;
+                            players[id].vx = data.vx; players[id].vy = data.vy;
+                            players[id].isGrounded = data.isGrounded;
+                            players[id].facingRight = data.facingRight;
+                            players[id].score = data.score;
+                            players[id].isDashing = data.isDashing;
+                            players[id].handAngle = data.handAngle;
+                            players[id].color = data.color;
+                            players[id].finished = data.finished;
+                            players[id].finishTime = data.finishTime;
+                            players[id].itemType = data.itemType;
+                            players[id].ammo = data.ammo;    // sync ammo
                         }
                     }
                 }
-                // Also update the local player’s own data (except position, which is driven locally)
-                if (package.payload.allPlayers[localPlayerId]) {
-                    players[localPlayerId].score = package.payload.allPlayers[localPlayerId].score;
-                    players[localPlayerId].color = package.payload.allPlayers[localPlayerId].color;
-                    players[localPlayerId].itemType = package.payload.allPlayers[localPlayerId].itemType;
-                    players[localPlayerId].finished = package.payload.allPlayers[localPlayerId].finished;
-                    players[localPlayerId].finishTime = package.payload.allPlayers[localPlayerId].finishTime;
-                    // Do NOT overwrite x,y,vx,vy,handAngle, etc. – those come from local input
+                if (pkg.payload.allPlayers[localPlayerId]) {
+                    const local = pkg.payload.allPlayers[localPlayerId];
+                    players[localPlayerId].score = local.score;
+                    players[localPlayerId].color = local.color;
+                    players[localPlayerId].itemType = local.itemType;
+                    players[localPlayerId].finished = local.finished;
+                    players[localPlayerId].finishTime = local.finishTime;
+                    players[localPlayerId].ammo = local.ammo;
                 }
-
-                // 2. Reconstruct UsableItem instances from itemType for ALL players
                 for (let id in players) {
                     if (players[id].itemType === 'pistol') {
-                        // If the existing item is not a pistolItem, create a new one
-                        if (!players[id].item || players[id].item.constructor !== pistolItem) {
-                            players[id].item = new pistolItem();
-                        }
+                        if (!players[id].item || players[id].item.constructor !== pistolItem)
+                            players[id].item = new pistolItem(players[id].ammo);
                     } else {
                         players[id].item = null;
                     }
                 }
-
-                // 3. Update local player's held item reference (for drawing and shooting)
-                if (players[localPlayerId] && players[localPlayerId].item) {
-                    localPlayerItem = players[localPlayerId].item;
-                } else {
-                    localPlayerItem = null;
-                }
-
+                if (players[localPlayerId] && players[localPlayerId].item) localPlayerItem = players[localPlayerId].item;
+                else localPlayerItem = null;
                 updateHudDisplays();
                 updateColorButtonStates();
                 break;
-            case 'sync_map':
-                platforms = package.payload.platforms;
-                hazards = package.payload.hazards;
-                gems = package.payload.gems;
-                break;
-            case 'sync_lobby_countdown':
-                lobbyCountdownVal = package.payload.value;
-                break;
-            case 'sync_ready_players':
-                readyPlayers = package.payload.readyPlayers;
-                break;
+            case 'sync_throwables': throwables = pkg.payload.throwables; break;
+            case 'sync_map': platforms = pkg.payload.platforms; hazards = pkg.payload.hazards; gems = pkg.payload.gems; break;
+            case 'sync_lobby_countdown': lobbyCountdownVal = pkg.payload.value; break;
+            case 'sync_ready_players': readyPlayers = pkg.payload.readyPlayers; break;
             case 'sync_face_drawing':
-                const facePlayerId = package.payload.playerId;
-                const faceData = package.payload.faceData;
-                localStorage.setItem('playerFaceDrawing_' + facePlayerId, faceData);
-                localStorage.setItem('playerHasCustomFace_' + facePlayerId, 'true');
+                localStorage.setItem('playerFaceDrawing_' + pkg.payload.playerId, pkg.payload.faceData);
+                localStorage.setItem('playerHasCustomFace_' + pkg.payload.playerId, 'true');
                 break;
-            case 'trigger_match_start':
-                executeActiveMatchStart();
-                break;
-            case 'sync_timer':
-                timerVal = package.payload.time;
-                document.getElementById('timer').innerText = timerVal;
-                break;
-            case 'match_over':
-                executeMatchEndingSequence(package.payload.summary);
-                break;
-            case 'return_to_lobby':
-                executeLobbyReturnSequence();
-                break;
-            case 'sync_race_start':
-                raceCountdownVal = package.payload.raceCountdownVal;
-                firstPlayerFinishTime = Date.now();
-                break;
-            case 'sync_race_countdown':
-                raceCountdownVal = package.payload.value;
-                break;
-            case 'sync_world_items':
-                if (itemManager) {
-                    itemManager.syncFromData(package.payload.items);
-                }
-                break;
-            case 'sync_projectiles':
-                projectiles = package.payload.projectiles;
-                break;
+            case 'trigger_match_start': executeActiveMatchStart(); break;
+            case 'sync_timer': timerVal = pkg.payload.time; document.getElementById('timer').innerText = timerVal; break;
+            case 'match_over': executeMatchEndingSequence(pkg.payload.summary); break;
+            case 'return_to_lobby': executeLobbyReturnSequence(); break;
+            case 'sync_race_start': raceCountdownVal = pkg.payload.raceCountdownVal; firstPlayerFinishTime = Date.now(); break;
+            case 'sync_race_countdown': raceCountdownVal = pkg.payload.value; break;
+            case 'sync_world_items': if (itemManager) itemManager.syncFromData(pkg.payload.items); break;
+            case 'sync_projectiles': projectiles = pkg.payload.projectiles; break;
         }
     });
-
-    conn.on('close', () => {
-        document.getElementById('disconnect-modal').classList.remove('hidden');
-    });
+    conn.on('close', () => document.getElementById('disconnect-modal').classList.remove('hidden'));
 }
 
-// Client-side heartbeat sender
 let clientHeartbeatTimer = null;
 function startClientHeartbeat(conn) {
     if (clientHeartbeatTimer) clearInterval(clientHeartbeatTimer);
-
     clientHeartbeatTimer = setInterval(() => {
-        if (!isHost && conn && conn.open) {
-            conn.send({ type: 'heartbeat' });
-        }
-    }, 1000); // Send heartbeat every second
+        if (!isHost && conn && conn.open) conn.send({ type: 'heartbeat' });
+    }, 1000);
 }
 
 function broadcastToRoom(type, payload) {
     if (!isHost) return;
     let msgPayload = payload;
-    // Special handling for sync_players: remove the 'item' property (contains HTMLImageElement)
     if (type === 'sync_players' && payload.allPlayers) {
-        const safePlayers = {};
+        const safe = {};
         for (let id in payload.allPlayers) {
-            const p = payload.allPlayers[id];
-            safePlayers[id] = { ...p };
-            delete safePlayers[id].item;   // DO NOT send the item instance
+            safe[id] = { ...payload.allPlayers[id] };
+            delete safe[id].item;
         }
-        msgPayload = { allPlayers: safePlayers };
+        msgPayload = { allPlayers: safe };
     }
-    const msg = { type: type, payload: msgPayload };
-    clientConnections.forEach(conn => {
-        if (conn.open) conn.send(msg);
-    });
+    const msg = { type, payload: msgPayload };
+    clientConnections.forEach(conn => { if (conn.open) conn.send(msg); });
 }
+
+let lastProjectileSnapshot = null;
+function broadcastProjectiles() {
+    if (!isHost) return;
+    const snap = JSON.stringify(projectiles);
+    if (snap === lastProjectileSnapshot) return;
+    lastProjectileSnapshot = snap;
+    broadcastToRoom('sync_projectiles', { projectiles });
+}
+
+function broadcastWorldItems() {
+    if (!isHost) return;
+    const itemsData = itemManager.worldItems.map(item => ({
+        x: item.x, y: item.y, itemType: item.itemType,
+        isAvailable: item.isAvailable, respawnTimer: item.respawnTimer,
+        pickupDelayTimer: item.pickupDelayTimer, shouldRespawn: item.shouldRespawn,
+        ammo: item.ammo
+    }));
+    broadcastToRoom('sync_world_items', { items: itemsData });
+}
+
+function cancelConnection() {
+    if (hostConnection) hostConnection.close();
+    clientConnections.forEach(c => c.close());
+    if (peer) peer.destroy();
+    location.reload();
+}
+function disconnectGame() { cancelConnection(); }
+
+// ============================================================================
+//  GAME STATE & LOBBY
+// ============================================================================
 
 function updateHudDisplays() {
     const count = Object.keys(players).length;
     document.getElementById('player-count-hud').innerText = `${count} / 6`;
-
     let stateLabel = "大廳整備中";
     if (currentEngineMode === 'MENU') stateLabel = "主選單配置中";
     if (currentEngineMode === 'GAME') stateLabel = "決戰進行中";
@@ -793,14 +704,11 @@ function updateHudDisplays() {
 function enterLobbyState() {
     currentEngineMode = 'LOBBY';
     lobbyCountdownVal = -1;
-    readyPlayers = {}; // Clear ready status when entering lobby
-
-    // Reset race variables
+    readyPlayers = {};
     raceStarted = false;
     firstPlayerFinishTime = -1;
     raceCountdownVal = -1;
     finishPositions = [];
-
     if (lobbyTimerId) clearInterval(lobbyTimerId);
     document.getElementById('menu-screen').classList.add('hidden');
     setupLobbyEnvironment();
@@ -809,53 +717,40 @@ function enterLobbyState() {
 
 function evaluateLobbyDoorTrigger() {
     if (!isHost || currentEngineMode !== 'LOBBY') return;
-
-    const totalPlayers = Object.keys(players).length;
-    const readyCount = Object.keys(readyPlayers).length;
-
-    // Check if more than half of the players are ready
-    if (totalPlayers >= 2 && readyCount > totalPlayers / 2) {
+    const total = Object.keys(players).length;
+    const ready = Object.keys(readyPlayers).length;
+    if (total >= 2 && ready > total / 2) {
         if (lobbyCountdownVal === -1) {
             lobbyCountdownVal = 10;
             playSound('door');
             broadcastToRoom('sync_lobby_countdown', { value: lobbyCountdownVal });
-
             if (lobbyTimerId) clearInterval(lobbyTimerId);
             lobbyTimerId = setInterval(() => {
                 if (currentEngineMode !== 'LOBBY') {
-                    clearInterval(lobbyTimerId);
-                    lobbyTimerId = null;
+                    clearInterval(lobbyTimerId); lobbyTimerId = null;
                     lobbyCountdownVal = -1;
                     return;
                 }
-
-                let currentTotal = Object.keys(players).length;
-                let currentReady = Object.keys(readyPlayers).length;
-
-                // Continue countdown if more than half are still ready
-                if (currentTotal >= 2 && currentReady > currentTotal / 2) {
+                let newTotal = Object.keys(players).length;
+                let newReady = Object.keys(readyPlayers).length;
+                if (newTotal >= 2 && newReady > newTotal / 2) {
                     lobbyCountdownVal--;
                     broadcastToRoom('sync_lobby_countdown', { value: lobbyCountdownVal });
-
                     if (lobbyCountdownVal <= 0) {
-                        clearInterval(lobbyTimerId);
-                        lobbyTimerId = null;
+                        clearInterval(lobbyTimerId); lobbyTimerId = null;
                         lobbyCountdownVal = -1;
                         broadcastToRoom('sync_lobby_countdown', { value: lobbyCountdownVal });
                         broadcastToRoom('trigger_match_start');
                         executeActiveMatchStart();
                     }
                 } else {
-                    // Stop countdown if condition no longer met
-                    clearInterval(lobbyTimerId);
-                    lobbyTimerId = null;
+                    clearInterval(lobbyTimerId); lobbyTimerId = null;
                     lobbyCountdownVal = -1;
                     broadcastToRoom('sync_lobby_countdown', { value: lobbyCountdownVal });
                 }
             }, 1000);
         }
     } else {
-        // Stop countdown if condition no longer met
         if (lobbyCountdownVal !== -1) {
             if (lobbyTimerId) clearInterval(lobbyTimerId);
             lobbyTimerId = null;
@@ -865,39 +760,24 @@ function evaluateLobbyDoorTrigger() {
     }
 }
 
-function getTouchingDoorCount() {
-    let touchingCount = 0;
-    for (let id in players) {
-        if (checkCollision(players[id], lobbyDoor)) {
-            touchingCount++;
-        }
-    }
-    return touchingCount;
-}
-
 function executeActiveMatchStart() {
     currentEngineMode = 'GAME';
-    readyPlayers = {}; // Clear ready status when starting the match
+    readyPlayers = {};
     setupActiveMatchEnvironment();
     updateHudDisplays();
-
-    // Initialize race tracking
     raceStarted = true;
     firstPlayerFinishTime = -1;
     raceCountdownVal = -1;
     finishPositions = [];
-
     let idx = 0;
     for (let id in players) {
-        players[id].x = 100 + (idx * 50);
+        players[id].x = 100 + idx * 50;
         players[id].y = 400;
-        players[id].vx = 0;
-        players[id].vy = 0;
+        players[id].vx = players[id].vy = 0;
         players[id].finished = false;
         players[id].finishTime = -1;
         idx++;
     }
-
     if (isHost) {
         timerVal = 60;
         if (gameTimer) clearInterval(gameTimer);
@@ -905,17 +785,13 @@ function executeActiveMatchStart() {
             timerVal--;
             broadcastToRoom('sync_timer', { time: timerVal });
             document.getElementById('timer').innerText = timerVal;
-
             if (timerVal <= 0) {
                 clearInterval(gameTimer);
-                // If race countdown hasn't finished, auto-end
                 if (raceCountdownVal !== -1) {
                     if (raceTimerId) clearInterval(raceTimerId);
                     raceTimerId = null;
                     let results = [];
-                    for (let id in players) {
-                        results.push({ id: id, nameTag: players[id].nameTag, score: players[id].score });
-                    }
+                    for (let id in players) results.push({ id, nameTag: players[id].nameTag, score: players[id].score });
                     broadcastToRoom('match_over', { summary: results });
                     executeMatchEndingSequence(results);
                 }
@@ -926,47 +802,31 @@ function executeActiveMatchStart() {
 
 function checkAndProcessRaceFinish() {
     if (!isHost || currentEngineMode !== 'GAME' || !raceStarted) return;
-
     for (let id in players) {
-        const player = players[id];
-        if (player.finished || !checkCollision(player, finishLine)) continue;
-
-        // Mark player as finished
-        player.finished = true;
-        player.finishTime = Date.now();
+        const pl = players[id];
+        if (pl.finished || !checkCollision(pl, finishLine)) continue;
+        pl.finished = true;
+        pl.finishTime = Date.now();
         finishPositions.push(id);
-
-        // If this is the first finisher, start the 30-second countdown
         if (firstPlayerFinishTime === -1) {
             firstPlayerFinishTime = Date.now();
             raceCountdownVal = 30;
             playSound('door');
-            broadcastToRoom('sync_race_start', { raceCountdownVal: raceCountdownVal });
-
+            broadcastToRoom('sync_race_start', { raceCountdownVal });
             if (raceTimerId) clearInterval(raceTimerId);
             raceTimerId = setInterval(() => {
                 raceCountdownVal--;
                 broadcastToRoom('sync_race_countdown', { value: raceCountdownVal });
-
                 if (raceCountdownVal <= 0) {
                     clearInterval(raceTimerId);
                     raceTimerId = null;
-
-                    // Award points based on finish position
-                    let points = [3, 2, 1]; // 1st, 2nd, 3rd
-                    for (let i = 0; i < Math.min(finishPositions.length, 3); i++) {
-                        if (players[finishPositions[i]]) {
-                            players[finishPositions[i]].score += points[i];
-                        }
-                    }
-
-                    // End the match
+                    let points = [3, 2, 1];
+                    for (let i = 0; i < Math.min(finishPositions.length, 3); i++)
+                        if (players[finishPositions[i]]) players[finishPositions[i]].score += points[i];
                     if (gameTimer) clearInterval(gameTimer);
                     gameTimer = null;
                     let results = [];
-                    for (let id in players) {
-                        results.push({ id: id, nameTag: players[id].nameTag, score: players[id].score, position: finishPositions.indexOf(id) + 1 || -1 });
-                    }
+                    for (let id in players) results.push({ id, nameTag: players[id].nameTag, score: players[id].score, position: finishPositions.indexOf(id) + 1 || -1 });
                     broadcastToRoom('match_over', { summary: results });
                     executeMatchEndingSequence(results);
                 }
@@ -979,22 +839,11 @@ function executeMatchEndingSequence(summary) {
     const overlay = document.getElementById('gameover-overlay');
     const resText = document.getElementById('match-result');
     overlay.classList.remove('hidden');
-
     summary.sort((a, b) => b.score - a.score);
     let resultText = "🏁 比賽結束\n";
-    resultText += summary.slice(0, 3).map((s, i) => {
-        const medals = ['🥇', '🥈', '🥉'];
-        return `${medals[i]} ${s.nameTag}: ${s.score} 分`;
-    }).join('\n');
-
+    resultText += summary.slice(0, 3).map((s, i) => `${['🥇', '🥈', '🥉'][i]} ${s.nameTag}: ${s.score} 分`).join('\n');
     resText.innerText = resultText;
-
-    // Auto return to lobby after 5 seconds
-    if (isHost) {
-        setTimeout(() => {
-            backToInteractiveLobby();
-        }, 5000);
-    }
+    if (isHost) setTimeout(() => backToInteractiveLobby(), 5000);
 }
 
 function backToInteractiveLobby() {
@@ -1006,82 +855,162 @@ function backToInteractiveLobby() {
 function executeLobbyReturnSequence() {
     document.getElementById('gameover-overlay').classList.add('hidden');
     enterLobbyState();
-
     let idx = 0;
     for (let id in players) {
-        players[id].x = 100 + (idx * 45);
+        players[id].x = 100 + idx * 45;
         players[id].y = 500;
-        players[id].vx = 0;
-        players[id].vy = 0;
+        players[id].vx = players[id].vy = 0;
         idx++;
     }
 }
 
-// Player-to-player collision resolution
+// ============================================================================
+//  PHYSICS & COLLISIONS
+// ============================================================================
+
+function checkCollision(r1, r2) {
+    return r1.x < r2.x + r2.w && r1.x + r1.width > r2.x &&
+        r1.y < r2.y + r2.h && r1.y + r1.height > r2.y;
+}
+
+function checkCircleCollision(player, gem) {
+    const cx = player.x + player.width / 2, cy = player.y + player.height / 2;
+    return Math.hypot(cx - gem.x, cy - gem.y) < (player.width / 2 + 15);
+}
+
 function resolvePlayerCollisions() {
-    const playerIds = Object.keys(players);
-    for (let i = 0; i < playerIds.length; i++) {
-        for (let j = i + 1; j < playerIds.length; j++) {
-            let p1 = players[playerIds[i]];
-            let p2 = players[playerIds[j]];
+    const ids = Object.keys(players);
+    for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+            let p1 = players[ids[i]], p2 = players[ids[j]];
+            if (p1.x < p2.x + p2.width && p1.x + p1.width > p2.x &&
+                p1.y < p2.y + p2.height && p1.y + p1.height > p2.y) {
+                const overlapLeft = p1.x + p1.width - p2.x;
+                const overlapRight = p2.x + p2.width - p1.x;
+                const overlapTop = p1.y + p1.height - p2.y;
+                const overlapBottom = p2.y + p2.height - p1.y;
+                const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+                const DASH_PUSH = 3;  // reduced from 10 to prevent extreme sliding
+                const MAX_KNOCKBACK_VEL = 6; // global cap after knockback
 
-            // Check AABB collision
-            if (p1.x < p2.x + p2.width &&
-                p1.x + p1.width > p2.x &&
-                p1.y < p2.y + p2.height &&
-                p1.y + p1.height > p2.y) {
-
-                // Simple collision resolution: push them away from each other horizontally
-                let overlapX = (p1.x + p1.width / 2) - (p2.x + p2.width / 2);
-                if (overlapX > 0) {
-                    p1.x += 2;
-                    p2.x -= 2;
-                } else {
-                    p1.x -= 2;
-                    p2.x += 2;
+                if (p1.isDashing && !p2.isDashing) {
+                    const dir = (p1.x + p1.width / 2) > (p2.x + p2.width / 2) ? 1 : -1;
+                    p2.vx += dir * DASH_PUSH;
+                    // clamp to prevent chain-sliding
+                    p2.vx = Math.min(MAX_KNOCKBACK_VEL, Math.max(-MAX_KNOCKBACK_VEL, p2.vx));
+                } else if (p2.isDashing && !p1.isDashing) {
+                    const dir = (p2.x + p2.width / 2) > (p1.x + p1.width / 2) ? 1 : -1;
+                    p1.vx += dir * DASH_PUSH;
+                    p1.vx = Math.min(MAX_KNOCKBACK_VEL, Math.max(-MAX_KNOCKBACK_VEL, p1.vx));
+                } else if (p1.isDashing && p2.isDashing) {
+                    const dir = (p1.x + p1.width / 2) > (p2.x + p2.width / 2) ? 1 : -1;
+                    p1.vx -= dir * DASH_PUSH * 0.7;
+                    p2.vx += dir * DASH_PUSH * 0.7;
+                    p1.vx = Math.min(MAX_KNOCKBACK_VEL, Math.max(-MAX_KNOCKBACK_VEL, p1.vx));
+                    p2.vx = Math.min(MAX_KNOCKBACK_VEL, Math.max(-MAX_KNOCKBACK_VEL, p2.vx));
                 }
+                if (minOverlap === overlapLeft || minOverlap === overlapRight) {
+                    const sep = Math.min(minOverlap, 5);
+                    if (minOverlap === overlapLeft) { p1.x -= sep; p2.x += sep; }
+                    else { p1.x += sep; p2.x -= sep; }
+                } else {
+                    const sep = Math.min(minOverlap, 5);
+                    if (minOverlap === overlapTop) { p1.y -= sep; p2.y += sep; }
+                    else { p1.y += sep; p2.y -= sep; }
+                    if (p1.vy > 0 && p2.vy < 0) { p1.vy = 0; p2.vy = 0; }
+                }
+                const MAX_PUSH = 18;
+                p1.vx = Math.min(MAX_PUSH, Math.max(-MAX_PUSH, p1.vx));
+                p2.vx = Math.min(MAX_PUSH, Math.max(-MAX_PUSH, p2.vx));
             }
         }
     }
 }
 
-// REMADE: Gameplay Physics Engine Mechanics Loop
 function updateCharacterPhysics(player, dt) {
-    // 1. Scale cooldowns by delta time instead of fixed integers
-    if (player.dashCooldown > 0) {
-        player.dashCooldown -= dt;
-    }
-
-    const wasGrounded = player.isGrounded;
-    let landed = false;
-
+    if (player.dashCooldown > 0) player.dashCooldown -= dt;
     let left = keys.ArrowLeft || touchState.left;
     let right = keys.ArrowRight || touchState.right;
     let jump = keys.ArrowUp || touchState.jump;
     let shift = keys.ShiftLeft;
-
     let dashJustPressed = shift && !player.wasDashPressed;
     player.wasDashPressed = shift;
 
+    // Start dash if conditions are met
     if (dashJustPressed && player.dashCooldown <= 0 && !player.isDashing) {
         player.isDashing = true;
         player.dashTimer = 10;
-        player.dashCooldown = 90; // coolcown in frames (1.5 seconds at 60fps)
-        // CRITICAL FIX: Removed player.vy = 0; to preserve jump momentum!
+        player.dashCooldown = 90;
     }
 
-    // --- HORIZONTAL AXIS PHYSICS ---
+    // ----- DASH MOVEMENT (stepped to avoid tunneling through players) -----
+    let dashMovementApplied = false;
     if (player.isDashing) {
         player.vx = player.facingRight ? DASH_SPEED : -DASH_SPEED;
+        const totalMove = player.vx * dt;
+        const stepSize = 3; // small step – guarantees we don't skip over a player
+        let moved = 0;
 
-        // 2. Decrement dash duration timer by delta slices
+        while (Math.abs(moved) < Math.abs(totalMove)) {
+            let remaining = Math.abs(totalMove) - Math.abs(moved);
+            let step = Math.min(stepSize, remaining);
+            let stepX = (totalMove > 0 ? step : -step);
+            let newX = player.x + stepX;
+
+            // Create a temporary player for collision checks
+            let tempPlayer = {
+                x: newX,
+                y: player.y,
+                width: player.width,
+                height: player.height
+            };
+
+            let collision = false;
+
+            // 1) Check collision with other players
+            for (let id in players) {
+                if (id === player.id) continue;
+                let other = players[id];
+                if (checkCollision(tempPlayer, other)) {
+                    collision = true;
+                    break;
+                }
+            }
+
+            // 2) Also check platforms – prevents dashing through walls
+            if (!collision) {
+                for (let plat of platforms) {
+                    if (checkCollision(tempPlayer, plat)) {
+                        collision = true;
+                        break;
+                    }
+                }
+            }
+
+            if (collision) {
+                // Stop dash immediately, do NOT apply the overlapping step
+                player.isDashing = false;
+                player.dashTimer = 0;
+                player.vx = 0;
+                dashMovementApplied = true;
+                break;
+            } else {
+                player.x = newX;
+                moved += stepX;
+                dashMovementApplied = true; // movement has been applied step‑by‑step
+            }
+        }
+
+        // Update dash timer
         player.dashTimer -= dt;
-
-        if (player.dashTimer <= 0) {
+        if (player.dashTimer <= 0 && player.isDashing) {
             player.isDashing = false;
             player.vx *= 0.4;
         }
-    } else {
+    }
+
+    // ----- NORMAL MOVEMENT (only if not dashing OR dash didn't move) -----
+    if (!player.isDashing && !dashMovementApplied) {
         if (left) {
             player.vx = -MOVE_SPEED;
             player.facingRight = false;
@@ -1089,66 +1018,51 @@ function updateCharacterPhysics(player, dt) {
             player.vx = MOVE_SPEED;
             player.facingRight = true;
         } else {
-            // 3. Convert linear friction multiplication to an exponential curve matching real-world time
             player.vx *= Math.pow(FRICTION, dt);
             if (Math.abs(player.vx) < 0.1) player.vx = 0;
         }
+        player.x += player.vx * dt;
     }
 
-    // --- VERTICAL AXIS PHYSICS ---
-    let dynamicGravity = GRAVITY;
-    if (jump && player.vy < 0) {
-        dynamicGravity = GRAVITY * 0.4;
-    }
-
-    // 4. Scale gravity acceleration steps by delta time
-    player.vy += dynamicGravity * dt;
-
+    // ----- GRAVITY & JUMP -----
+    let dynGravity = GRAVITY;
+    if (jump && player.vy < 0) dynGravity = GRAVITY * 0.4;
+    player.vy += dynGravity * dt;
     if (player.vy > MAX_FALL_SPEED) player.vy = MAX_FALL_SPEED;
-
-    if (player.isGrounded) {
-        player.jumpsLeft = 2;
-    }
-
-    // Jump Input Triggers (Instant velocity impulses do NOT get multiplied by dt)
+    if (player.isGrounded) player.jumpsLeft = 2;
     let jumpJustPressed = jump && !player.wasJumpPressed;
     player.wasJumpPressed = jump;
-
     if (jumpJustPressed) {
         if (player.isGrounded) {
             player.vy = -6;
             player.isGrounded = false;
             player.jumpsLeft = 1;
             playSound('jump');
-            spawnJumpParticles(player.x + player.width / 2, player.y + player.height, true); // <-- grounded = true
+            spawnJumpParticles(player.x + player.width / 2, player.y + player.height, true);
         } else if (player.jumpsLeft > 0) {
             player.vy = -6;
             player.jumpsLeft = 0;
             playSound('jump');
-            spawnJumpParticles(player.x + player.width / 2, player.y + player.height, false); // <-- airborne
+            spawnJumpParticles(player.x + player.width / 2, player.y + player.height, false);
         }
     }
 
-
+    // ----- PLATFORM COLLISION (horizontal) -----
     player.isGrounded = false;
-
-    // --- POSITION UPDATES AND BOUNDING BOX COLLISIONS ---
-
-    // 5. Multiply the velocity vector by delta time before modifying coordinates
-    player.x += player.vx * dt;
-
+    // Skip horizontal platform collision if we already handled dash movement and ended early?
+    // We still run it because the player might have been moved by dash stepping.
     platforms.forEach(plat => {
         if (checkCollision(player, plat)) {
             if (player.vx > 0) player.x = plat.x - player.width;
             else if (player.vx < 0) player.x = plat.x + plat.w;
             player.vx = 0;
-            if (player.isDashing) player.isDashing = false; // Cancel dash on wall hit
+            if (player.isDashing) player.isDashing = false;
         }
     });
 
-    // 6. Multiply vertical fall/rise steps by delta time
+    // ----- VERTICAL MOVEMENT & PLATFORM COLLISION -----
     player.y += player.vy * dt;
-
+    let landed = false;
     platforms.forEach(plat => {
         if (checkCollision(player, plat)) {
             if (player.vy > 0) {
@@ -1163,9 +1077,11 @@ function updateCharacterPhysics(player, dt) {
         }
     });
 
+    // ----- BOUNDARIES -----
     if (player.x < 20) player.x = 20;
     if (player.x + player.width > 1260) player.x = 1260 - player.width;
 
+    // ----- HAZARDS -----
     hazards.forEach(h => {
         if (checkCollision(player, h)) {
             player.isDashing = false;
@@ -1173,300 +1089,175 @@ function updateCharacterPhysics(player, dt) {
         }
     });
 
+    // ----- GEMS -----
     gems.forEach(g => {
         if (!g.collected && checkCircleCollision(player, g)) {
-            if (isHost) {
-                processGemCapture(g.id, player.id);
-            } else {
-                hostConnection.send({
-                    type: 'request_collect_gem',
-                    senderId: localPlayerId,
-                    payload: { gemId: g.id }
-                });
-            }
+            if (isHost) processGemCapture(g.id, player.id);
+            else hostConnection.send({ type: 'request_collect_gem', senderId: localPlayerId, payload: { gemId: g.id } });
         }
     });
 
-    // --- PLAYER-ON-PLAYER STACKING ---
+    // ----- PLAYER ON TOP OF OTHER PLAYER (head jump) -----
     for (let otherId in players) {
         if (otherId === player.id) continue;
         let target = players[otherId];
-
-        // Check if player is falling onto another player's head
-        if (player.vy > 0 &&
-            player.x + player.width > target.x &&
-            player.x < target.x + target.width &&
-            player.y + player.height <= target.y + 5 &&
-            player.y + player.height + player.vy * dt >= target.y) {
-
-            // Snap player onto target's head
+        if (player.vy > 0 && player.x + player.width > target.x && player.x < target.x + target.width &&
+            player.y + player.height <= target.y + 5 && player.y + player.height + player.vy * dt >= target.y) {
             player.y = target.y - player.height;
             player.vy = 0;
             player.isGrounded = true;
             landed = true;
         }
     }
-    if (!wasGrounded && landed) {
-        // spawn once at feet
+
+    // ----- LANDING PARTICLES -----
+    if (!player.isGrounded && landed) {
         spawnDustParticles(player.x + player.width / 2, player.y + player.height);
-        playSound('spike'); // optional landing sound
+        playSound('spike');
     }
 }
 
-// Spawn jump particles. grounded = true when jump started from ground.
-function spawnJumpParticles(spawnX, spawnY, grounded = false) {
-    if (grounded) {
-        // Two-sided burst at feet: left and right sprays
-        const outwardSpeed = 2.2;
-        const upwardSpeed = -1.6;
-        const countPerSide = 6;
-
-        for (let i = 0; i < countPerSide; i++) {
-            // Right side
-            pushParticle({
-                type: 'jump_side',
-                x: spawnX + 6 + Math.random() * 6,
-                y: spawnY + 2 + (Math.random() - 0.5) * 4,
-                vx: outwardSpeed + Math.random() * 0.8,
-                vy: upwardSpeed + (Math.random() - 0.5) * 0.6,
-                life: 0.6 + Math.random() * 0.2,
-                age: 0,
-                size: Math.random() * 2 + 1.2,
-                radius: 4,
-                bounce: 0.18,
-                friction: 0.88,
-                onGround: false,
-                color: '#d0d0d0',
-                alpha: 1
-            });
-
-            // Left side
-            pushParticle({
-                type: 'jump_side',
-                x: spawnX - 6 + (Math.random() - 0.5) * 6,
-                y: spawnY + 2 + (Math.random() - 0.5) * 4,
-                vx: -outwardSpeed - Math.random() * 0.8,
-                vy: upwardSpeed + (Math.random() - 0.5) * 0.6,
-                life: 0.6 + Math.random() * 0.2,
-                age: 0,
-                size: Math.random() * 2 + 1.2,
-                radius: 4,
-                bounce: 0.18,
-                friction: 0.88,
-                onGround: false,
-                color: '#d0d0d0',
-                alpha: 1
-            });
-        }
-
-        // small center sparks for visual punch
-        for (let i = 0; i < 4; i++) {
-            pushParticle({
-                type: 'spark',
-                x: spawnX + (Math.random() - 0.5) * 8,
-                y: spawnY,
-                vx: (Math.random() - 0.5) * 0.6,
-                vy: -0.6 + Math.random() * 0.4,
-                life: 0.45,
-                age: 0,
-                size: Math.random() * 1.2 + 0.6,
-                color: '#ffffff',
-                alpha: 1
-            });
-        }
-    } else {
-        // Keep original downward burst for mid-air jumps
-        for (let i = 0; i < 8; i++) {
-            pushParticle({
-                type: 'dust_down',
-                x: spawnX + (Math.random() - 0.5) * 14,
-                y: spawnY + 2,
-                vx: (Math.random() - 0.5) * 1.2,
-                vy: (Math.random() * 0.6 + 0.6), // downward
-                life: 0.45,
-                age: 0,
-                size: Math.random() * 3 + 1.2,
-                radius: 5,
-                bounce: 0.12,
-                friction: 0.9,
-                onGround: false,
-                color: '#bfbfbf',
-                alpha: 1
-            });
-        }
-
-        // optional small sparks
-        for (let i = 0; i < 4; i++) {
-            pushParticle({
-                type: 'spark',
-                x: spawnX + (Math.random() - 0.5) * 8,
-                y: spawnY,
-                vx: (Math.random() - 0.5) * 1.0,
-                vy: (Math.random() * 0.6 + 0.2),
-                life: 0.5,
-                age: 0,
-                size: Math.random() * 1.6 + 0.8,
-                color: '#ffffff',
-                alpha: 1
-            });
-        }
+function processGemCapture(gemId, targetId) {
+    if (!isHost) return;
+    const gem = gems.find(g => g.id === gemId);
+    if (gem && !gem.collected) {
+        gem.collected = true;
+        if (players[targetId]) players[targetId].score += 10;
+        playSound('gem');
+        broadcastToRoom('sync_map', { platforms, hazards, gems });
+        broadcastToRoom('sync_players', { allPlayers: players });
+        updateHudDisplays();
     }
 }
 
-// Grounded landing dust: launch outward a short range then fall
-function spawnDustParticles(spawnX, spawnY) {
-    // Short outward burst then gravity takes over
-    const count = 12;
-    for (let i = 0; i < count; i++) {
-        const dir = (i % 2 === 0) ? 1 : -1; // alternate left/right
-        const speed = 1.6 + Math.random() * 1.2;
-        const upward = -0.8 - Math.random() * 0.8;
-
-        pushParticle({
-            type: 'dust_up', // re-used type but now with outward velocity
-            x: spawnX + (Math.random() - 0.5) * 8,
-            y: spawnY + 2,
-            vx: dir * speed + (Math.random() - 0.5) * 0.6,
-            vy: upward + (Math.random() - 0.3) * 0.4,
-            life: 0.8 + Math.random() * 0.4,
-            age: 0,
-            size: Math.random() * 2 + 1.6,
-            radius: 5,
-            bounce: 0.22,
-            friction: 0.86,
-            onGround: false,
-            color: '#888888',
-            alpha: 1
-        });
-    }
+function respawnMatchEntity(player) {
+    player.x = 100; player.y = 200; player.vx = player.vy = 0;
+    player.score = Math.max(0, player.score - 5);
+    playSound('spike');
+    if (isHost) { broadcastToRoom('sync_players', { allPlayers: players }); updateHudDisplays(); }
 }
+
+// ============================================================================
+//  PARTICLES
+// ============================================================================
 
 const PARTICLE_CAP = 250;
-
 function pushParticle(p) {
     if (particles.length >= PARTICLE_CAP) particles.shift();
     if (p.alpha === undefined) p.alpha = 1;
     particles.push(p);
 }
 
+function spawnJumpParticles(spawnX, spawnY, grounded) {
+    if (grounded) {
+        const outward = 2.2, upward = -1.6;
+        for (let i = 0; i < 6; i++) {
+            pushParticle({
+                type: 'jump_side', x: spawnX + 6 + Math.random() * 6, y: spawnY + 2 + (Math.random() - 0.5) * 4,
+                vx: outward + Math.random() * 0.8, vy: upward + (Math.random() - 0.5) * 0.6, life: 0.6 + Math.random() * 0.2, age: 0,
+                size: Math.random() * 2 + 1.2, radius: 4, bounce: 0.18, friction: 0.88, onGround: false, color: '#d0d0d0', alpha: 1
+            });
+            pushParticle({
+                type: 'jump_side', x: spawnX - 6 + (Math.random() - 0.5) * 6, y: spawnY + 2 + (Math.random() - 0.5) * 4,
+                vx: -outward - Math.random() * 0.8, vy: upward + (Math.random() - 0.5) * 0.6, life: 0.6 + Math.random() * 0.2, age: 0,
+                size: Math.random() * 2 + 1.2, radius: 4, bounce: 0.18, friction: 0.88, onGround: false, color: '#d0d0d0', alpha: 1
+            });
+        }
+        for (let i = 0; i < 4; i++) pushParticle({
+            type: 'spark', x: spawnX + (Math.random() - 0.5) * 8, y: spawnY,
+            vx: (Math.random() - 0.5) * 0.6, vy: -0.6 + Math.random() * 0.4, life: 0.45, age: 0, size: Math.random() * 1.2 + 0.6, color: '#ffffff', alpha: 1
+        });
+    } else {
+        for (let i = 0; i < 8; i++) pushParticle({
+            type: 'dust_down', x: spawnX + (Math.random() - 0.5) * 14, y: spawnY + 2,
+            vx: (Math.random() - 0.5) * 1.2, vy: Math.random() * 0.6 + 0.6, life: 0.45, age: 0, size: Math.random() * 3 + 1.2,
+            radius: 5, bounce: 0.12, friction: 0.9, onGround: false, color: '#bfbfbf', alpha: 1
+        });
+        for (let i = 0; i < 4; i++) pushParticle({
+            type: 'spark', x: spawnX + (Math.random() - 0.5) * 8, y: spawnY,
+            vx: (Math.random() - 0.5) * 1.0, vy: Math.random() * 0.6 + 0.2, life: 0.5, age: 0, size: Math.random() * 1.6 + 0.8, color: '#ffffff', alpha: 1
+        });
+    }
+}
 
-// UPDATED: Physically accurate particle engine with player/hazard collision
+function spawnDustParticles(spawnX, spawnY) {
+    for (let i = 0; i < 12; i++) {
+        const dir = i % 2 === 0 ? 1 : -1;
+        pushParticle({
+            type: 'dust_up', x: spawnX + (Math.random() - 0.5) * 8, y: spawnY + 2,
+            vx: dir * (1.6 + Math.random() * 1.2) + (Math.random() - 0.5) * 0.6, vy: -0.8 - Math.random() * 0.8 + (Math.random() - 0.3) * 0.4,
+            life: 0.8 + Math.random() * 0.4, age: 0, size: Math.random() * 2 + 1.6, radius: 5, bounce: 0.22, friction: 0.86,
+            onGround: false, color: '#888888', alpha: 1
+        });
+    }
+}
+
 function updateParticles(dt) {
-    const seconds = dt * (1 / 60);
-    const GRAV = 18; // Particle gravity constant
-
+    const seconds = dt / 60;
+    const GRAV = 18;
     for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
-
-        // Age and lifetime
         p.age += seconds;
-        if (p.age >= p.life) {
-            particles.splice(i, 1);
-            continue;
-        }
-
-        // Gravity
-        if (!p.onGround) {
-            p.vy += GRAV * seconds;
-        }
-
-        // Integrate position (scale by dt to match engine)
-        p.x += p.vx * dt;
-        p.y += p.vy * dt;
-
-        // Platform collisions (existing)
+        if (p.age >= p.life) { particles.splice(i, 1); continue; }
+        if (!p.onGround) p.vy += GRAV * seconds;
+        p.x += p.vx * dt; p.y += p.vy * dt;
         for (let plat of platforms) {
-            if (p.x + p.radius < plat.x || p.x - p.radius > plat.x + plat.w ||
-                p.y + p.radius < plat.y || p.y - p.radius > plat.y + plat.h) continue;
-
-            const nearestX = Math.max(plat.x, Math.min(p.x, plat.x + plat.w));
-            const nearestY = Math.max(plat.y, Math.min(p.y, plat.y + plat.h));
-            const dx = p.x - nearestX;
-            const dy = p.y - nearestY;
-            const dist2 = dx * dx + dy * dy;
-
-            if (dist2 <= (p.radius * p.radius)) {
-                const dist = Math.sqrt(dist2) || 0.0001;
-                const pen = p.radius - dist;
-
-                // Push particle out of platform
-                p.x += (dx / dist) * pen;
-                p.y += (dy / dist) * pen;
-
-                // If hitting top, settle or bounce
+            if (p.x + p.radius < plat.x || p.x - p.radius > plat.x + plat.w || p.y + p.radius < plat.y || p.y - p.radius > plat.y + plat.h) continue;
+            const nx = Math.max(plat.x, Math.min(p.x, plat.x + plat.w));
+            const ny = Math.max(plat.y, Math.min(p.y, plat.y + plat.h));
+            const dx = p.x - nx, dy = p.y - ny;
+            const d2 = dx * dx + dy * dy;
+            if (d2 <= p.radius * p.radius) {
+                const d = Math.sqrt(d2) || 0.0001;
+                const pen = p.radius - d;
+                p.x += (dx / d) * pen; p.y += (dy / d) * pen;
                 if (dy < 0) {
-                    if (Math.abs(p.vy) > 1.0) {
-                        p.vy = -p.vy * (p.bounce || 0.2);
-                        p.vx *= 0.7;
-                    } else {
-                        p.vy = 0;
-                        p.onGround = true;
-                        p.vx *= (p.friction || 0.85);
-                    }
-                } else {
-                    p.vx *= 0.6;
-                    p.vy *= 0.6;
-                }
+                    if (Math.abs(p.vy) > 1.0) { p.vy = -p.vy * (p.bounce || 0.2); p.vx *= 0.7; }
+                    else { p.vy = 0; p.onGround = true; p.vx *= (p.friction || 0.85); }
+                } else { p.vx *= 0.6; p.vy *= 0.6; }
             }
         }
-
-        // NEW: Simple collision with players (AABB). Particles bounce off players slightly.
         for (let id in players) {
             const pl = players[id];
             if (!pl) continue;
-            // AABB test
-            if (p.x + p.radius > pl.x && p.x - p.radius < pl.x + pl.width &&
-                p.y + p.radius > pl.y && p.y - p.radius < pl.y + pl.height) {
-
-                // Push particle away from player center
-                const cx = (pl.x + pl.width / 2);
-                const cy = (pl.y + pl.height / 2);
-                let dx = p.x - cx;
-                let dy = p.y - cy;
-                const d = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+            if (p.x + p.radius > pl.x && p.x - p.radius < pl.x + pl.width && p.y + p.radius > pl.y && p.y - p.radius < pl.y + pl.height) {
+                const cx = pl.x + pl.width / 2, cy = pl.y + pl.height / 2;
+                let dx = p.x - cx, dy = p.y - cy;
+                const d = Math.hypot(dx, dy) || 0.0001;
                 dx /= d; dy /= d;
-
-                // Nudge particle out and damp velocity
                 p.x += dx * (p.radius + Math.max(pl.width, pl.height) * 0.1);
                 p.y += dy * (p.radius + Math.max(pl.width, pl.height) * 0.1);
                 p.vx = p.vx * 0.4 + dx * 0.6;
                 p.vy = p.vy * 0.4 + dy * 0.6;
             }
         }
-
-        // NEW: Simple collision with hazards (treat as solid)
         for (let h of hazards) {
-            if (p.x + p.radius > h.x && p.x - p.radius < h.x + h.w &&
-                p.y + p.radius > h.y && p.y - p.radius < h.y + h.h) {
-
-                // Bounce away from hazard center
-                const hx = h.x + h.w / 2;
-                const hy = h.y + h.h / 2;
-                let dx = p.x - hx;
-                let dy = p.y - hy;
-                const d = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+            if (p.x + p.radius > h.x && p.x - p.radius < h.x + h.w && p.y + p.radius > h.y && p.y - p.radius < h.y + h.h) {
+                const hx = h.x + h.w / 2, hy = h.y + h.h / 2;
+                let dx = p.x - hx, dy = p.y - hy;
+                const d = Math.hypot(dx, dy) || 0.0001;
                 dx /= d; dy /= d;
-
                 p.x += dx * (p.radius + Math.max(h.w, h.h) * 0.1);
                 p.y += dy * (p.radius + Math.max(h.w, h.h) * 0.1);
                 p.vx = p.vx * 0.3 + dx * 0.6;
                 p.vy = p.vy * 0.3 + dy * 0.6;
             }
         }
-
-        // Appearance updates
-        p.alpha = Math.max(0, 1 - (p.age / p.life));
+        p.alpha = Math.max(0, 1 - p.age / p.life);
         p.renderSize = (p.size || 2) * (0.6 + 0.4 * (1 - p.age / p.life));
     }
 }
 
+// ============================================================================
+//  RENDERING
+// ============================================================================
 
 function drawParticles() {
     particles.forEach(p => {
         if (p.type === 'dust_down') {
             ctx.globalAlpha = p.alpha * 0.9;
             ctx.fillStyle = p.color;
-            ctx.fillRect(p.x - p.renderSize, p.y - (p.renderSize * 0.15), p.renderSize * 2, p.renderSize * 0.35);
+            ctx.fillRect(p.x - p.renderSize, p.y - p.renderSize * 0.15, p.renderSize * 2, p.renderSize * 0.35);
         } else if (p.type === 'dust_up') {
             ctx.globalAlpha = p.alpha;
             ctx.fillStyle = p.color;
@@ -1478,1410 +1269,734 @@ function drawParticles() {
     ctx.globalAlpha = 1;
 }
 
-function processGemCapture(gemId, targetId) {
-    if (!isHost) return;
-    const targetGem = gems.find(g => g.id === gemId);
-    if (targetGem && !targetGem.collected) {
-        targetGem.collected = true;
-        if (players[targetId]) players[targetId].score += 10;
-
-        playSound('gem');
-        broadcastToRoom('sync_map', { platforms, hazards, gems });
-        broadcastToRoom('sync_players', { allPlayers: players });
-        updateHudDisplays();
-    }
-}
-
-function respawnMatchEntity(player) {
-    player.x = 100;
-    player.y = 200;
-    player.vx = 0;
-    player.vy = 0;
-    player.score = Math.max(0, player.score - 5);
-    playSound('spike');
-
-    if (isHost) {
-        broadcastToRoom('sync_players', { allPlayers: players });
-        updateHudDisplays();
-    }
-}
-
-// Boundary Collision utilities
-function checkCollision(r1, r2) {
-    return (r1.x < r2.x + r2.w && r1.x + r1.width > r2.x && r1.y < r2.y + r2.h && r1.y + r1.height > r2.y);
-}
-
-function checkCircleCollision(player, gem) {
-    const pCenterX = player.x + player.width / 2;
-    const pCenterY = player.y + player.height / 2;
-    return Math.hypot(pCenterX - gem.x, pCenterY - gem.y) < (player.width / 2 + 15);
-}
-
-// Rendering elements
-function drawCanvasLevelLayout() {
-    platforms.forEach(plat => {
-        ctx.fillStyle = '#170c30';
-        ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
-        ctx.strokeStyle = '#7f00ff';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(plat.x, plat.y, plat.w, plat.h);
-    });
-
-    hazards.forEach(h => {
-        ctx.fillStyle = '#ff003c';
-        ctx.fillRect(h.x, h.y, h.w, h.h);
-    });
-
-    gems.forEach(g => {
-        if (g.collected) return;
-        ctx.fillStyle = '#00ff66';
-        ctx.beginPath();
-        ctx.arc(g.x, g.y, 8, 0, Math.PI * 2);
-        ctx.fill();
-    });
-
-    projectiles.forEach(p => {
-        if (bulletImage && bulletImage.complete) {
-            ctx.save();
-            ctx.translate(p.x, p.y);
-            const angle = Math.atan2(p.vy, p.vx);
-            ctx.rotate(angle);
-            ctx.drawImage(bulletImage, -p.radius, -p.radius, p.radius * 2, p.radius * 2);
-            ctx.restore();
-        } else {
-            // fallback: draw a simple circle if image not ready
-            ctx.fillStyle = '#ffaa44';
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.fillStyle = '#ff6600';
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, p.radius - 2, 0, Math.PI * 2);
-            ctx.fill();
-        }
-    });
-
-    if (itemManager) {
-        for (let wi of itemManager.worldItems) {
-            wi.draw(ctx, itemManager);   // ← pass itemManager here
-        }
-    }
-
-    if (currentEngineMode === 'GAME') {
-        // Draw finish line with animated flag effect
-        const time = Date.now() * 0.001;
-        const flagWave = Math.sin(time * 3) * 8;
-
-        // Finish line base (green)
-        ctx.fillStyle = '#00ff66';
-        ctx.fillRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
-        ctx.strokeStyle = '#00cc44';
-        ctx.lineWidth = 3;
-        ctx.strokeRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
-
-        // Flag pole
-        ctx.fillStyle = '#ffff00';
-        ctx.fillRect(finishLine.x + finishLine.w / 2 - 2, finishLine.y - 30, 4, 30);
-
-        // Animated flag
-        ctx.fillStyle = '#ff007f';
-        ctx.beginPath();
-        ctx.moveTo(finishLine.x + finishLine.w / 2 + 2, finishLine.y - 20);
-        ctx.lineTo(finishLine.x + finishLine.w / 2 + 20 + flagWave, finishLine.y - 25);
-        ctx.lineTo(finishLine.x + finishLine.w / 2 + 20 + flagWave, finishLine.y - 10);
-        ctx.closePath();
-        ctx.fill();
-
-        // Draw "FINISH" text on the line
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 12px "Orbitron"';
-        ctx.textAlign = 'center';
-        ctx.fillText('FINISH', finishLine.x + finishLine.w / 2, finishLine.y + finishLine.h / 2 + 3);
-    } else if (currentEngineMode === 'LOBBY') {
-        ctx.shadowColor = skinDoor.color;
-        ctx.shadowBlur = 15;
-        ctx.fillStyle = '#1c0515';
-        ctx.fillRect(skinDoor.x, skinDoor.y, skinDoor.w, skinDoor.h);
-        ctx.strokeStyle = skinDoor.color;
-        ctx.lineWidth = 4;
-        ctx.strokeRect(skinDoor.x, skinDoor.y, skinDoor.w, skinDoor.h);
-
-        ctx.fillStyle = '#ffffff';
-        ctx.font = '12px "Orbitron"';
-        ctx.textAlign = 'center';
-        ctx.shadowBlur = 0;
-
-        ctx.shadowColor = lobbyDoor.color;
-        ctx.shadowBlur = 15;
-        ctx.fillStyle = '#2a1a00';
-        ctx.fillRect(lobbyDoor.x, lobbyDoor.y, lobbyDoor.w, lobbyDoor.h);
-
-        ctx.strokeStyle = lobbyDoor.color;
-        ctx.lineWidth = 4;
-        ctx.strokeRect(lobbyDoor.x, lobbyDoor.y, lobbyDoor.w, lobbyDoor.h);
-        ctx.shadowBlur = 0;
-
-        // Draw scoreboard in lobby
-        drawLobbyScoreboard();
-    }
-}
-
 function drawLobbyScoreboard() {
-    const scoreboardX = 50;
-    const scoreboardY = 50;
-    const scoreboardW = 250;
-    const scoreboardH = 200;
-
-    // Background
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    ctx.fillRect(scoreboardX, scoreboardY, scoreboardW, scoreboardH);
-
-    // Border
-    ctx.strokeStyle = '#00f2fe';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(scoreboardX, scoreboardY, scoreboardW, scoreboardH);
-
-    // Title
-    ctx.fillStyle = '#00f2fe';
-    ctx.font = 'bold 14px "Orbitron"';
-    ctx.textAlign = 'left';
-    ctx.fillText('📊 Scoreboard', scoreboardX + 10, scoreboardY + 25);
-
-    // Sort players by score
-    const sortedPlayers = Object.values(players).sort((a, b) => b.score - a.score);
-
-    // Draw player scores
+    const x = 50, y = 50, w = 250, h = 200;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#00f2fe'; ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = '#00f2fe'; ctx.font = 'bold 14px "Orbitron"'; ctx.textAlign = 'left'; ctx.fillText('📊 Scoreboard', x + 10, y + 25);
+    const sorted = Object.values(players).sort((a, b) => b.score - a.score);
     ctx.font = '12px "Orbitron"';
-    sortedPlayers.slice(0, 5).forEach((player, index) => {
-        const y = scoreboardY + 45 + (index * 30);
-
-        // Player color dot
-        ctx.fillStyle = player.color;
-        ctx.beginPath();
-        ctx.arc(scoreboardX + 15, y, 4, 0, Math.PI * 2);
-        ctx.fill();
-
-        // Player name
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText(`${player.nameTag}:`, scoreboardX + 30, y + 4);
-
-        // Score
-        ctx.fillStyle = '#ffff00';
-        ctx.textAlign = 'right';
-        ctx.fillText(`${player.score} pt`, scoreboardX + scoreboardW - 15, y + 4);
+    sorted.slice(0, 5).forEach((pl, idx) => {
+        const yy = y + 45 + idx * 30;
+        ctx.fillStyle = pl.color; ctx.beginPath(); ctx.arc(x + 15, yy, 4, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#ffffff'; ctx.fillText(`${pl.nameTag}:`, x + 30, yy + 4);
+        ctx.fillStyle = '#ffff00'; ctx.textAlign = 'right'; ctx.fillText(`${pl.score} pt`, x + w - 15, yy + 4);
         ctx.textAlign = 'left';
     });
 }
 
-// Calculate hand angle for a player looking at cursor
+function drawCanvasLevelLayout() {
+    platforms.forEach(plat => {
+        ctx.fillStyle = '#170c30'; ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+        ctx.strokeStyle = '#7f00ff'; ctx.lineWidth = 2; ctx.strokeRect(plat.x, plat.y, plat.w, plat.h);
+    });
+    hazards.forEach(h => { ctx.fillStyle = '#ff003c'; ctx.fillRect(h.x, h.y, h.w, h.h); });
+    gems.forEach(g => { if (!g.collected) { ctx.fillStyle = '#00ff66'; ctx.beginPath(); ctx.arc(g.x, g.y, 8, 0, Math.PI * 2); ctx.fill(); } });
+    projectiles.forEach(p => {
+        if (bulletImage.complete) {
+            ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(Math.atan2(p.vy, p.vx));
+            ctx.drawImage(bulletImage, -p.radius, -p.radius, p.radius * 2, p.radius * 2);
+            ctx.restore();
+        } else {
+            ctx.fillStyle = '#ffaa44'; ctx.beginPath(); ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#ff6600'; ctx.beginPath(); ctx.arc(p.x, p.y, p.radius - 2, 0, Math.PI * 2); ctx.fill();
+        }
+    });
+    const MAX_THROWABLE_LIFE = 150;
+    for (let t of throwables) {
+        ctx.save(); ctx.translate(t.x, t.y); ctx.rotate(t.angle);
+        const preview = itemManager.getPreviewImage(t.itemType);
+        if (preview?.complete) ctx.drawImage(preview, -12, -12, 24, 24);
+        else { ctx.fillStyle = '#ffaa44'; ctx.fillRect(-12, -12, 24, 24); ctx.fillStyle = '#fff'; ctx.font = '12px monospace'; ctx.fillText('?', -4, 4); }
+        ctx.restore();
+        const percent = Math.max(0, Math.min(1, (MAX_THROWABLE_LIFE - t.life) / MAX_THROWABLE_LIFE));
+        const barX = t.x - 12, barY = t.y - 14;
+        ctx.fillStyle = '#222'; ctx.fillRect(barX, barY, 24, 4);
+        ctx.fillStyle = t.itemType === 'pistol' ? '#ffaa44' : '#88ff88';
+        ctx.fillRect(barX, barY, 24 * percent, 4);
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.5; ctx.strokeRect(barX, barY, 24, 4);
+        ctx.font = 'bold 8px monospace'; ctx.fillStyle = '#fff'; ctx.shadowBlur = 0;
+        ctx.fillText(`${Math.floor(percent * 100)}%`, t.x, barY - 2);
+    }
+    if (itemManager) for (let wi of itemManager.worldItems) wi.draw(ctx, itemManager);
+    if (currentEngineMode === 'GAME') {
+        const time = Date.now() * 0.001, flagWave = Math.sin(time * 3) * 8;
+        ctx.fillStyle = '#00ff66'; ctx.fillRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
+        ctx.strokeStyle = '#00cc44'; ctx.lineWidth = 3; ctx.strokeRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
+        ctx.fillStyle = '#ffff00'; ctx.fillRect(finishLine.x + finishLine.w / 2 - 2, finishLine.y - 30, 4, 30);
+        ctx.fillStyle = '#ff007f'; ctx.beginPath(); ctx.moveTo(finishLine.x + finishLine.w / 2 + 2, finishLine.y - 20);
+        ctx.lineTo(finishLine.x + finishLine.w / 2 + 20 + flagWave, finishLine.y - 25);
+        ctx.lineTo(finishLine.x + finishLine.w / 2 + 20 + flagWave, finishLine.y - 10); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 12px "Orbitron"'; ctx.textAlign = 'center';
+        ctx.fillText('FINISH', finishLine.x + finishLine.w / 2, finishLine.y + finishLine.h / 2 + 3);
+    } else if (currentEngineMode === 'LOBBY') {
+        ctx.shadowColor = skinDoor.color; ctx.shadowBlur = 15;
+        ctx.fillStyle = '#1c0515'; ctx.fillRect(skinDoor.x, skinDoor.y, skinDoor.w, skinDoor.h);
+        ctx.strokeStyle = skinDoor.color; ctx.lineWidth = 4; ctx.strokeRect(skinDoor.x, skinDoor.y, skinDoor.w, skinDoor.h);
+        ctx.fillStyle = '#fff'; ctx.font = '12px "Orbitron"'; ctx.textAlign = 'center'; ctx.shadowBlur = 0;
+        ctx.shadowColor = lobbyDoor.color; ctx.shadowBlur = 15;
+        ctx.fillStyle = '#2a1a00'; ctx.fillRect(lobbyDoor.x, lobbyDoor.y, lobbyDoor.w, lobbyDoor.h);
+        ctx.strokeStyle = lobbyDoor.color; ctx.lineWidth = 4; ctx.strokeRect(lobbyDoor.x, lobbyDoor.y, lobbyDoor.w, lobbyDoor.h);
+        ctx.shadowBlur = 0;
+        drawLobbyScoreboard();
+    }
+}
+
 function calculateHandAngle(player) {
-    const handPivotX = player.x + player.width * 0.5;
-    const handPivotY = player.y + 32;
-
-    const mouseWorld = getMouseWorldPos();
-    const dx = mouseWorld.x - handPivotX;
-    const dy = mouseWorld.y - handPivotY;
-
-    // Calculate angle to cursor
-    const cursorAngle = Math.atan2(dy, dx);
-
-    // Player facing direction: 0 rad = facing right, Math.PI = facing left
+    const handX = player.x + player.width / 2, handY = player.y + 32;
+    const mouse = getMouseWorldPos();
+    const cursorAngle = Math.atan2(mouse.y - handY, mouse.x - handX);
     const facingAngle = player.facingRight ? 0 : Math.PI;
-
-    // Calculate angle difference (normalized to -π to π)
-    let angleDiff = cursorAngle - facingAngle;
-    while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
-    while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
-
-    // Only draw hand if cursor is within 150° (75° each side) of facing direction
-    const maxAngle = (150 * Math.PI) / 360; // 75 degrees in radians
-
-    if (Math.abs(angleDiff) <= maxAngle) {
-        // Cursor is within view cone - point at cursor
-        return cursorAngle;
-    } else {
-        // Cursor is behind player - point hand backward at edge of view cone
-        return facingAngle + (angleDiff > 0 ? maxAngle : -maxAngle);
-    }
+    let diff = cursorAngle - facingAngle;
+    while (diff > Math.PI) diff -= 2 * Math.PI;
+    while (diff < -Math.PI) diff += 2 * Math.PI;
+    const maxAngle = (150 * Math.PI) / 360;
+    if (Math.abs(diff) <= maxAngle) return cursorAngle;
+    return facingAngle + (diff > 0 ? maxAngle : -maxAngle);
 }
 
-// Adaptive outline: dark for light colors, white for dark colors
-function getAdaptiveOutlineColor(hexColor) {
-    // Convert hex to RGB
+function getAdaptiveOutlineColor(hex) {
     let r, g, b;
-    if (hexColor.startsWith('#')) {
-        r = parseInt(hexColor.slice(1, 3), 16);
-        g = parseInt(hexColor.slice(3, 5), 16);
-        b = parseInt(hexColor.slice(5, 7), 16);
-    } else {
-        // fallback for any non-hex color (shouldn't happen)
-        return 'rgba(255,255,255,0.8)';
-    }
-    // Calculate relative luminance (perceived brightness)
-    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-    // If color is light (>0.7), use dark outline; else use white outline
-    return luminance > 0.7 ? 'rgba(0,0,0,0.9)' : 'rgba(255,255,255,0.9)';
+    if (hex.startsWith('#')) { r = parseInt(hex.slice(1, 3), 16); g = parseInt(hex.slice(3, 5), 16); b = parseInt(hex.slice(5, 7), 16); }
+    else return 'rgba(255,255,255,0.8)';
+    const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return lum > 0.7 ? 'rgba(0,0,0,0.9)' : 'rgba(255,255,255,0.9)';
 }
 
-function roundedRect(ctx, x, y, w, h, radius) {
+function roundedRect(ctx, x, y, w, h, r) {
     ctx.beginPath();
-    ctx.moveTo(x + radius, y);
-    ctx.lineTo(x + w - radius, y);
-    ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
-    ctx.lineTo(x + w, y + h - radius);
-    ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
-    ctx.lineTo(x + radius, y + h);
-    ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
-    ctx.lineTo(x, y + radius);
-    ctx.quadraticCurveTo(x, y, x + radius, y);
-    ctx.closePath();
+    ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r); ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y); ctx.closePath();
 }
 
-function drawCharacterModel(pModel) {
-    // Visual / outline settings
-    const OUTLINE_WIDTH = 3;
-    let OUTLINE_COLOR = getAdaptiveOutlineColor(pModel.color);
-
-    // Visual split
-    const bodyVisualRatio = 0.58;
-    const bodyVisualHeight = Math.max(12, Math.round(pModel.height * bodyVisualRatio));
-
-    // Body geometry
-    const bodyX = pModel.x;
-    const bodyY = pModel.y + 10;
-    const bodyW = pModel.width;
-    const bodyH = bodyVisualHeight;
-
-    // Leg setup
-    const hipY = bodyY + bodyH - 2; // Kept tuck fix from before
-    const hipCenterX = pModel.x + pModel.width / 2;
-    const LEG_SPREAD = 1;
-    const HIP_OFFSET_X = Math.max(4, Math.round(pModel.width * 0.22 * LEG_SPREAD));
-
-    // Landscape leg dimensions
-    const LANDSCAPE_LEG_HEIGHT = 22;
-    const LANDSCAPE_LEG_WIDTH = 6;
-
-    // Animation constants
+function drawCharacterModel(p) {
+    const OUTLINE = 3;
+    let outlineColor = getAdaptiveOutlineColor(p.color);
+    const bodyRatio = 0.58;
+    const bodyH = Math.max(12, Math.round(p.height * bodyRatio));
+    const bodyX = p.x, bodyY = p.y + 10, bodyW = p.width;
+    const hipY = bodyY + bodyH - 2;
+    const hipCenterX = p.x + p.width / 2;
+    const HIP_OFFSET_X = Math.max(4, Math.round(p.width * 0.22));
+    const LEG_H = 22, LEG_W = 6;
     const now = Date.now();
-    const LEG_SWING_SPEED = 0.012;
-    const LEG_SWING_AMP = 0.6;
-
-    // Directional Jump Angles
-    const JUMP_TUCK_RIGHT = 0.3;
-    const JUMP_TUCK_LEFT = -0.3;
-    const DOUBLE_JUMP_TUCK_RIGHT = 0.45; // Exaggerated turn for double jump right
-    const DOUBLE_JUMP_TUCK_LEFT = -0.45; // Exaggerated turn for double jump left
-    const FALL_STRETCH_RIGHT = 0.1;
-    const FALL_STRETCH_LEFT = -0.1;
-
-    let leftLegAngle = 0;
-    let rightLegAngle = 0;
-
-    // Determine direction (fallback to velocity if facingRight isn't explicitly set)
-    const isFacingRight = pModel.facingRight !== undefined ? pModel.facingRight : (pModel.vx >= 0);
-    const animateLocally = (pModel.id === localPlayerId);
-
-    // --- SYSTEM CONSOLIDATED ANIMATION ENGINE ---
-    if (pModel.isGrounded) {
-        const isWalking = Math.abs(pModel.vx) > 0.15;
-
-        if (isWalking) {
-            // WALKING ANIMATION (Applies to both Client & Remote Players)
-            let phase = Math.sin(now * LEG_SWING_SPEED);
-            // Local player scales with actual MOVE_SPEED config, remote handles fallback smoothly
-            const maxSpeedRef = animateLocally ? MOVE_SPEED : Math.max(0.15, Math.abs(pModel.vx));
-            const speedFactor = Math.min(Math.abs(pModel.vx) / maxSpeedRef, 1);
-            const swing = LEG_SWING_AMP * speedFactor * phase;
-
-            // Flip swing phases naturally based on moving direction
-            if (pModel.vx < -0.01) {
-                leftLegAngle = -swing;
-                rightLegAngle = swing;
-            } else {
-                leftLegAngle = swing;
-                rightLegAngle = -swing;
-            }
+    const LEG_SPEED = 0.012, LEG_AMP = 0.6;
+    const JUMP_R = 0.3, JUMP_L = -0.3, DOUBLE_R = 0.45, DOUBLE_L = -0.45, FALL_R = 0.1, FALL_L = -0.1;
+    let leftLeg = 0, rightLeg = 0;
+    const facingRight = p.facingRight !== undefined ? p.facingRight : p.vx >= 0;
+    const animateLocally = p.id === localPlayerId;
+    if (p.isGrounded) {
+        if (Math.abs(p.vx) > 0.15) {
+            let phase = Math.sin(now * LEG_SPEED);
+            const maxRef = animateLocally ? MOVE_SPEED : Math.max(0.15, Math.abs(p.vx));
+            const factor = Math.min(Math.abs(p.vx) / maxRef, 1);
+            const swing = LEG_AMP * factor * phase;
+            if (p.vx < -0.01) { leftLeg = -swing; rightLeg = swing; }
+            else { leftLeg = swing; rightLeg = -swing; }
         } else {
-            // IDLE ANIMATION
-            if (animateLocally) {
-                // Subtle breathing sway for local client player
-                const idleSway = Math.sin(now * 0.004) * 0.06;
-                leftLegAngle = idleSway;
-                rightLegAngle = -idleSway;
-            } else {
-                // Standing static for remote network players to save performance
-                leftLegAngle = 0;
-                rightLegAngle = 0;
-            }
+            if (animateLocally) { const sway = Math.sin(now * 0.004) * 0.06; leftLeg = sway; rightLeg = -sway; }
+            else { leftLeg = rightLeg = 0; }
         }
     } else {
-        // AIRBORNE ANIMATION (Jumping / Falling - Direction Dependent)
-        const isRising = pModel.vy < 0;
-
-        const isDoubleJumping = pModel.jumpsLeft === 0;
-
-        if (isFacingRight) {
-            if (isRising) {
-                // Apply the steeper angle if double jumping, otherwise use standard tuck
-                if (isDoubleJumping) {
-                    leftLegAngle = DOUBLE_JUMP_TUCK_RIGHT;
-                    rightLegAngle = DOUBLE_JUMP_TUCK_RIGHT - 1.2;
-                }
-                else {
-                    leftLegAngle = rightLegAngle = JUMP_TUCK_RIGHT;
-                }
-            } else {
-                leftLegAngle = rightLegAngle = FALL_STRETCH_RIGHT;
-            }
+        const rising = p.vy < 0;
+        const doubleJump = p.jumpsLeft === 0;
+        if (facingRight) {
+            if (rising) { leftLeg = rightLeg = doubleJump ? DOUBLE_R : JUMP_R; }
+            else { leftLeg = rightLeg = FALL_R; }
         } else {
-            if (isRising) {
-                // Apply the steeper angle if double jumping, otherwise use standard tuck
-                if (isDoubleJumping) {
-                    leftLegAngle = DOUBLE_JUMP_TUCK_LEFT + 1.2;
-                    rightLegAngle = DOUBLE_JUMP_TUCK_LEFT;
-                }
-                else {
-                    leftLegAngle = rightLegAngle = JUMP_TUCK_LEFT;
-                }
-            } else {
-                leftLegAngle = rightLegAngle = FALL_STRETCH_LEFT;
-            }
+            if (rising) { leftLeg = rightLeg = doubleJump ? DOUBLE_L : JUMP_L; }
+            else { leftLeg = rightLeg = FALL_L; }
         }
     }
-
-    // LAYER 1: Draw legs completely underneath everything else
-    const drawLeg = (angle, offsetX) => {
-        ctx.save();
-        ctx.translate(hipCenterX + offsetX, hipY);
-        ctx.rotate(Math.PI / 2 + angle);
-        ctx.fillStyle = pModel.color;
-        ctx.lineWidth = OUTLINE_WIDTH;
-        ctx.strokeStyle = OUTLINE_COLOR;
-
-        ctx.fillRect(0, -LANDSCAPE_LEG_WIDTH / 2, LANDSCAPE_LEG_HEIGHT, LANDSCAPE_LEG_WIDTH);
-        ctx.strokeRect(0, -LANDSCAPE_LEG_WIDTH / 2, LANDSCAPE_LEG_HEIGHT, LANDSCAPE_LEG_WIDTH);
-
+    const drawLeg = (angle, offX) => {
+        ctx.save(); ctx.translate(hipCenterX + offX, hipY); ctx.rotate(Math.PI / 2 + angle);
+        ctx.fillStyle = p.color; ctx.lineWidth = OUTLINE; ctx.strokeStyle = outlineColor;
+        ctx.fillRect(0, -LEG_W / 2, LEG_H, LEG_W); ctx.strokeRect(0, -LEG_W / 2, LEG_H, LEG_W);
         ctx.restore();
     };
-
-    drawLeg(leftLegAngle, -HIP_OFFSET_X);
-    drawLeg(rightLegAngle, HIP_OFFSET_X);
-
-    // LAYER 2: Draw body fill (Cleans leg tops)
-    ctx.fillStyle = pModel.color;
-    ctx.fillRect(bodyX, bodyY, bodyW, bodyH);
-
-    // LAYER 3: Draw body outline
-    ctx.lineWidth = OUTLINE_WIDTH;
-    ctx.strokeStyle = OUTLINE_COLOR;
-    ctx.strokeRect(bodyX, bodyY, bodyW, bodyH);
-
-    // LAYER 4: Head
-    const headRadius = pModel.width / 1.4;
-    const headCenterX = pModel.x + pModel.width / 2;
-    const headCenterY = pModel.y + 20;
-
-    ctx.fillStyle = pModel.color;
-    ctx.beginPath();
-    ctx.arc(headCenterX, headCenterY, headRadius, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.lineWidth = OUTLINE_WIDTH;
-    ctx.strokeStyle = OUTLINE_COLOR;
-    ctx.stroke();
-
-    // LAYER 4.5: Draw custom face if exists
-    const hasCustomFace = localStorage.getItem('playerHasCustomFace_' + pModel.id) === 'true';
-    if (hasCustomFace) {
-        const savedFaceData = localStorage.getItem('playerFaceDrawing_' + pModel.id);
-        if (savedFaceData) {
-            // Load from cache or create new Image
-            if (!faceImageCache[pModel.id] || faceImageCache[pModel.id].src !== savedFaceData) {
-                faceImageCache[pModel.id] = new Image();
-                faceImageCache[pModel.id].src = savedFaceData;
+    drawLeg(leftLeg, -HIP_OFFSET_X); drawLeg(rightLeg, HIP_OFFSET_X);
+    ctx.fillStyle = p.color; ctx.fillRect(bodyX, bodyY, bodyW, bodyH);
+    ctx.lineWidth = OUTLINE; ctx.strokeStyle = outlineColor; ctx.strokeRect(bodyX, bodyY, bodyW, bodyH);
+    const headR = p.width / 1.4;
+    const headX = p.x + p.width / 2, headY = p.y + 20;
+    ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(headX, headY, headR, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    const hasFace = localStorage.getItem('playerHasCustomFace_' + p.id) === 'true';
+    if (hasFace) {
+        const faceData = localStorage.getItem('playerFaceDrawing_' + p.id);
+        if (faceData) {
+            if (!faceImageCache[p.id] || faceImageCache[p.id].src !== faceData) {
+                faceImageCache[p.id] = new Image(); faceImageCache[p.id].src = faceData;
             }
-
-            const faceImg = faceImageCache[pModel.id];
-            if (faceImg.complete) { // Image is already loaded
-                ctx.save();
-                ctx.beginPath();
-                ctx.arc(headCenterX, headCenterY, headRadius, 0, Math.PI * 2);
-                ctx.clip();
-
-                // Draw face image scaled to head size
-                const faceSize = headRadius * 2 * 0.95;
-                ctx.drawImage(faceImg,
-                    headCenterX - faceSize / 2,
-                    headCenterY - faceSize / 2,
-                    faceSize,
-                    faceSize);
+            const faceImg = faceImageCache[p.id];
+            if (faceImg.complete) {
+                ctx.save(); ctx.beginPath(); ctx.arc(headX, headY, headR, 0, Math.PI * 2); ctx.clip();
+                const size = headR * 2 * 0.95; ctx.drawImage(faceImg, headX - size / 2, headY - size / 2, size, size);
                 ctx.restore();
             }
         }
     }
-
-    // LAYER 5: Arms (Aiming logic)
-    const handPivotX = pModel.x + pModel.width * 0.5;
-    const handPivotY = pModel.y + (bodyH * 0.22) + 30;
-    const handAngle = (pModel.id === localPlayerId)
-        ? calculateHandAngle(pModel)
-        : (pModel.handAngle !== undefined ? pModel.handAngle : (isFacingRight ? 0 : Math.PI));
-
-    ctx.save();
-    ctx.translate(handPivotX, handPivotY);
-    ctx.rotate(handAngle);
-    ctx.fillStyle = pModel.color;
-
-    // Draw rounded rectangle arm
-    roundedRect(ctx, 0, -3, 18, 6, 3);
-    ctx.fill();
-    ctx.lineWidth = OUTLINE_WIDTH;
-    ctx.strokeStyle = OUTLINE_COLOR;
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(24, 0, 6, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
+    const handPivotX = p.x + p.width / 2;
+    const handPivotY = p.y + (bodyH * 0.22) + 30;
+    const handAngle = (p.id === localPlayerId) ? calculateHandAngle(p) : (p.handAngle !== undefined ? p.handAngle : (facingRight ? 0 : Math.PI));
+    ctx.save(); ctx.translate(handPivotX, handPivotY); ctx.rotate(handAngle);
+    ctx.fillStyle = p.color; roundedRect(ctx, 0, -3, 18, 6, 3); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(24, 0, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     ctx.restore();
-
-    // Draw held item if any
-    if (pModel.item) {
-        const handPivotX = pModel.x + pModel.width * 0.5;
-        const handPivotY = pModel.y + (bodyH * 0.22) + 30;
-        const angle = handAngle;
-        const handX = handPivotX + Math.cos(angle) * 24;
-        const handY = handPivotY + Math.sin(angle) * 24;
-        pModel.item.draw(ctx, handX, handY, angle, pModel.facingRight);
+    if (p.item) {
+        const handX = handPivotX + Math.cos(handAngle) * 24;
+        const handY = handPivotY + Math.sin(handAngle) * 24;
+        p.item.draw(ctx, handX, handY, handAngle, p.facingRight);
+        // Only show ammo for the local player
+        if (p.id === localPlayerId && p.itemType === 'pistol' && p.item.ammo !== undefined) {
+            ctx.font = 'bold 14px "Orbitron"';
+            ctx.fillStyle = '#fff';
+            ctx.shadowBlur = 2;
+            ctx.shadowColor = '#000';
+            ctx.textAlign = 'center';
+            ctx.fillText(`${p.item.ammo}`, handX, handY - 8);
+        }
     }
-
-    // LAYER 6: UI / Nametag
-    ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.font = 'bold 10px monospace';
-    ctx.textAlign = 'center';
-    let labelStr = pModel.nameTag || 'P?';
-    if (pModel.id === localPlayerId) labelStr += ' (YOU)';
-    ctx.fillText(labelStr, pModel.x + pModel.width / 2, pModel.y - 20);
-
-    if (pModel.isGrounded && pModel.vy > 5 && !pModel.isDashing) {
-        spawnDustParticles(pModel.x, pModel.y + pModel.height);
-    }
+    ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center';
+    let label = p.nameTag || 'P?'; if (p.id === localPlayerId) label += ' (YOU)';
+    ctx.fillText(label, p.x + p.width / 2, p.y - 20);
+    if (p.isGrounded && p.vy > 5 && !p.isDashing) spawnDustParticles(p.x, p.y + p.height);
 }
 
-// Helper to step through particle arrays and clean them up when dead
 function updateAndRenderParticles() {
     for (let i = particles.length - 1; i >= 0; i--) {
         let p = particles[i];
-        p.x += p.vx;
-        p.y += p.vy;
-        p.alpha -= 0.04; // Fade out rate
-
-        if (p.alpha <= 0) {
-            particles.splice(i, 1);
-            continue;
-        }
-
-        ctx.save();
-        ctx.globalAlpha = p.alpha;
-        ctx.fillStyle = p.color;
-        // Draw decorative retro square dust trail particle fragments
-        ctx.fillRect(p.x, p.y, p.size, p.size);
-        ctx.restore();
+        p.x += p.vx; p.y += p.vy;
+        p.alpha -= 0.04;
+        if (p.alpha <= 0) { particles.splice(i, 1); continue; }
+        ctx.save(); ctx.globalAlpha = p.alpha; ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, p.size, p.size); ctx.restore();
     }
 }
 
 function drawOffscreenRadarIndicators() {
     if (!players[localPlayerId]) return;
-
-    const padding = 25; // Margin away from canvas edges
-
+    const pad = 25;
     for (let id in players) {
-        if (id === localPlayerId) continue; // Skip ourselves
-
+        if (id === localPlayerId) continue;
         let p = players[id];
-
-        // Convert world platform positions into real screen pixel positions
-        let screenX = (p.x + p.width / 2 - camera.x) * camera.zoom;
-        let screenY = (p.y + p.height / 2 - camera.y) * camera.zoom;
-
-        // Determine if target coordinates sit outside our 1280x720 window
-        let isOffscreen = (screenX < 0 || screenX > BASE_WIDTH || screenY < 0 || screenY > BASE_HEIGHT);
-
-        if (isOffscreen) {
-            // Pin arrow coordinates cleanly inside screen boundaries
-            let arrowX = Math.max(padding, Math.min(BASE_WIDTH - padding, screenX));
-            let arrowY = Math.max(padding, Math.min(BASE_HEIGHT - padding, screenY));
-
-            // Derive directional rotation pointing outward toward player's position
-            let angle = Math.atan2(screenY - arrowY, screenX - arrowX);
-
-            ctx.save();
-            ctx.translate(arrowX, arrowY);
-            ctx.rotate(angle);
-
-            // Draw a high-visibility neon triangular arrow matching player color
-            ctx.fillStyle = p.color;
-            ctx.shadowColor = p.color;
-            ctx.shadowBlur = 10;
-
-            ctx.beginPath();
-            ctx.moveTo(12, 0);     // Tip of pointer facing outward
-            ctx.lineTo(-8, -10);   // Back top tail
-            ctx.lineTo(-4, 0);     // Indented center tail
-            ctx.lineTo(-8, 10);    // Back bottom tail
-            ctx.closePath();
-            ctx.fill();
-
-            // Draw a micro label marker for player tracking identification
-            ctx.shadowBlur = 0;
-            ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 9px monospace';
-            ctx.textAlign = 'center';
-            ctx.fillText("PLR", -16, 3);
-
-            ctx.restore();
+        let sx = (p.x + p.width / 2 - camera.x) * camera.zoom;
+        let sy = (p.y + p.height / 2 - camera.y) * camera.zoom;
+        if (sx < 0 || sx > BASE_WIDTH || sy < 0 || sy > BASE_HEIGHT) {
+            let ax = Math.max(pad, Math.min(BASE_WIDTH - pad, sx));
+            let ay = Math.max(pad, Math.min(BASE_HEIGHT - pad, sy));
+            let angle = Math.atan2(sy - ay, sx - ax);
+            ctx.save(); ctx.translate(ax, ay); ctx.rotate(angle);
+            ctx.fillStyle = p.color; ctx.shadowColor = p.color; ctx.shadowBlur = 10;
+            ctx.beginPath(); ctx.moveTo(12, 0); ctx.lineTo(-8, -10); ctx.lineTo(-4, 0); ctx.lineTo(-8, 10); ctx.fill();
+            ctx.shadowBlur = 0; ctx.fillStyle = '#fff'; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center';
+            ctx.fillText("PLR", -16, 3); ctx.restore();
         }
     }
 }
 
-// NEW: Draw a custom, private neon dash cooldown indicator above the character
 function drawDashCooldownBar(p) {
-    const barWidth = p.width + 10;       // Match the width of your character
-    const barHeight = 3;            // Thickness of the bar
-    const x = p.x - 5;
-    const y = p.y - 12;             // Floats 24 pixels directly above the character's head
-
-    // 1. Draw the semi-transparent dark background track frame
-    ctx.fillStyle = 'rgba(11, 6, 18, 0.7)';
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-    ctx.lineWidth = 1;
-    ctx.fillRect(x, y, barWidth, barHeight);
-    ctx.strokeRect(x, y, barWidth, barHeight);
-
-    // 2. Calculate the filling progress factor (from 0.0 to 1.0)
-    const maxCooldown = 45; // Matches the player.dashCooldown assignment in your physics rules
-    let currentCooldown = Math.max(0, p.dashCooldown || 0);
-    let fillPercent = (maxCooldown - currentCooldown) / maxCooldown;
-    fillPercent = Math.max(0, Math.min(1, fillPercent)); // Safety clamp boundaries
-
-    // 3. Draw the filling animation bar with contextual glow states
-    ctx.save(); // Save canvas context state to separate shadows from the rest of the game scene
-
-    if (fillPercent >= 1) {
-        // --- DASH READY STATE: Radiant Cyan Glowing Bar ---
-        ctx.shadowBlur = 10;
-        ctx.shadowColor = '#00f2fe';
-        ctx.fillStyle = '#00f2fe';
-    } else {
-        // --- CHARGING STATE: Dim Neon Pink Bar (No Glow) ---
-        ctx.shadowBlur = 0;
-        ctx.fillStyle = '#ff007f';
-    }
-
-    // Render the filled fraction slice inside the track container
-    ctx.fillRect(x + 0.5, y + 0.5, (barWidth - 1) * fillPercent, barHeight - 1);
-
-    ctx.restore(); // Safely clear out shadow configuration for subsequent rendering iterations
+    const w = p.width + 10, h = 3, x = p.x - 5, y = p.y - 12;
+    ctx.fillStyle = 'rgba(11,6,18,0.7)'; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 1; ctx.strokeRect(x, y, w, h);
+    const maxCD = 45, cur = Math.max(0, p.dashCooldown || 0);
+    let fill = (maxCD - cur) / maxCD;
+    fill = Math.max(0, Math.min(1, fill));
+    ctx.save();
+    if (fill >= 1) { ctx.shadowBlur = 10; ctx.shadowColor = '#00f2fe'; ctx.fillStyle = '#00f2fe'; }
+    else { ctx.fillStyle = '#ff007f'; }
+    ctx.fillRect(x + 0.5, y + 0.5, (w - 1) * fill, h - 1);
+    ctx.restore();
 }
 
-// Convert world coordinates to screen space (after camera transforms are removed)
-function worldToScreen(worldX, worldY) {
-    return {
-        sx: (worldX - camera.x) * camera.zoom + BASE_WIDTH / 2,
-        sy: (worldY - camera.y) * camera.zoom + BASE_HEIGHT / 2
-    };
-}
+// ============================================================================
+//  UI DOORS
+// ============================================================================
 
-// REFACTORED: Draw interactive skin door UI with neon glow styling (world space - zooms with camera)
 function drawSkinDoorUI() {
-    if (currentEngineMode !== 'LOBBY') {
-        return;
-    }
-
-    // Setup neon text styling
-    ctx.fillStyle = '#ffffff';
-    ctx.font = '20px "Orbitron"';
-    ctx.textAlign = 'center';
-    ctx.shadowColor = '#ff007f';
-    ctx.shadowBlur = 12;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 0;
-
-    // Door center in WORLD coordinates (not screen space)
-    const doorCenterX = skinDoor.x + skinDoor.w / 2;
-    const doorCenterY = skinDoor.y;
-
-    // Draw "Edit Skin" label above the door (always visible)
-    ctx.fillText("Edit Skin", doorCenterX, doorCenterY - 20);
-
-    // Draw "[F] | open" prompt at the door center (only when colliding)
-    const localPlayer = players[localPlayerId];
-    if (localPlayer && checkCollision(localPlayer, skinDoor)) {
-        ctx.fillText("[F] | open", doorCenterX, doorCenterY + skinDoor.h / 2);
-
-        // Handle interaction
-        if (keys.Interact) {
-            openSkinMenu();
-            keys.Interact = false;
-        }
+    if (currentEngineMode !== 'LOBBY') return;
+    ctx.fillStyle = '#fff'; ctx.font = '20px "Orbitron"'; ctx.textAlign = 'center';
+    ctx.shadowColor = '#ff007f'; ctx.shadowBlur = 12;
+    const cx = skinDoor.x + skinDoor.w / 2, cy = skinDoor.y;
+    ctx.fillText("Edit Skin", cx, cy - 20);
+    const local = players[localPlayerId];
+    if (local && checkCollision(local, skinDoor)) {
+        ctx.fillText("[F] | open", cx, cy + skinDoor.h / 2);
+        if (keys.Interact) { openSkinMenu(); keys.Interact = false; }
     }
 }
 
-// Draw start door UI label with neon glow styling
 function drawStartDoorUI() {
-    if (currentEngineMode !== 'LOBBY') {
-        return;
-    }
-
-    // Setup neon text styling
-    ctx.fillStyle = '#ffffff';
-    ctx.font = '20px "Orbitron"';
-    ctx.textAlign = 'center';
-    ctx.shadowColor = '#ffcc00';
-    ctx.shadowBlur = 12;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 0;
-
-    // Door center in WORLD coordinates (not screen space)
-    const doorCenterX = lobbyDoor.x + lobbyDoor.w / 2;
-    const doorCenterY = lobbyDoor.y;
-
-    // Draw "Start" label above the door (always visible)
-    ctx.fillText("Start", doorCenterX, doorCenterY - 20);
-
-    // Draw "[F] | Ready" prompt at the door center (only when colliding)
-    const localPlayer = players[localPlayerId];
-    if (localPlayer && checkCollision(localPlayer, lobbyDoor)) {
-        ctx.fillText("[F] | Ready", doorCenterX, doorCenterY + lobbyDoor.h / 2);
-
-        // Handle interaction
+    if (currentEngineMode !== 'LOBBY') return;
+    ctx.fillStyle = '#fff'; ctx.font = '20px "Orbitron"'; ctx.textAlign = 'center';
+    ctx.shadowColor = '#ffcc00'; ctx.shadowBlur = 12;
+    const cx = lobbyDoor.x + lobbyDoor.w / 2, cy = lobbyDoor.y;
+    ctx.fillText("Start", cx, cy - 20);
+    const local = players[localPlayerId];
+    if (local && checkCollision(local, lobbyDoor)) {
+        ctx.fillText("[F] | Ready", cx, cy + lobbyDoor.h / 2);
         if (keys.Interact) {
-            // Toggle ready status
-            if (readyPlayers[localPlayerId]) {
-                delete readyPlayers[localPlayerId];
-            } else {
-                readyPlayers[localPlayerId] = true;
-            }
+            if (readyPlayers[localPlayerId]) delete readyPlayers[localPlayerId];
+            else readyPlayers[localPlayerId] = true;
             keys.Interact = false;
-
-            // Broadcast ready status to host if this is a client
-            if (!isHost && hostConnection && hostConnection.open) {
-                hostConnection.send({
-                    type: 'player_ready_toggle',
-                    senderId: localPlayerId,
-                    payload: { isReady: readyPlayers[localPlayerId] ? true : false }
-                });
+            if (!isHost && hostConnection?.open) {
+                hostConnection.send({ type: 'player_ready_toggle', senderId: localPlayerId, payload: { isReady: !!readyPlayers[localPlayerId] } });
             }
         }
     }
-
-    // Show ready count at the bottom
-    const totalPlayers = Object.keys(players).length;
-    const readyCount = Object.keys(readyPlayers).length;
-    ctx.font = '16px "Orbitron"';
-    ctx.fillText(`Ready: ${readyCount}/${totalPlayers}`, doorCenterX, doorCenterY - lobbyDoor.h / 2 - 15);
+    const total = Object.keys(players).length, ready = Object.keys(readyPlayers).length;
+    ctx.font = '16px "Orbitron"'; ctx.fillText(`Ready: ${ready}/${total}`, cx, cy - lobbyDoor.h / 2 - 15);
 }
 
-// Updated to accept the browser's high-resolution timestamp
-function enginePipelineTick(timestamp) {
-    // Initialize timestamp on the very first frame execution
-    if (!lastTime) lastTime = timestamp;
+// ============================================================================
+//  MAIN GAME LOOP
+// ============================================================================
 
-    // Calculate delta time relative to a baseline of 60 FPS (16.66ms per frame = dt of 1.0)
+function enginePipelineTick(timestamp) {
+    if (!lastTime) lastTime = timestamp;
     let dt = (timestamp - lastTime) / 16.666;
     lastTime = timestamp;
-
-    // Safety Cap: Prevent massive physics glitches/clipping if the browser lags or focus drops
     if (dt > 3.0) dt = 3.0;
-
-    ctx.fillStyle = '#24212a';  // lobby color
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
+    ctx.fillStyle = '#24212a'; ctx.fillRect(0, 0, canvas.width, canvas.height);
     if (currentEngineMode === 'LOBBY' || currentEngineMode === 'GAME') {
         let localPlayer = players[localPlayerId];
-
         if (localPlayer) {
-            // PASS DELTA TIME DOWN INTO PHYSICS
             updateCharacterPhysics(localPlayer, dt);
-
-            // Resolve player-to-player collisions
             resolvePlayerCollisions();
-
-            // Check for race finish in GAME mode
-            if (currentEngineMode === 'GAME' && isHost) {
-                checkAndProcessRaceFinish();
-            }
-
+            if (currentEngineMode === 'GAME' && isHost) checkAndProcessRaceFinish();
             if (isHost) {
                 evaluateLobbyDoorTrigger();
-                // Update local player's hand angle for sync
                 localPlayer.handAngle = calculateHandAngle(localPlayer);
                 broadcastToRoom('sync_players', { allPlayers: players });
             } else {
-                // inside enginePipelineTick, where client sends input to host
                 hostConnection.send({
-                    type: 'client_input_update',
-                    senderId: localPlayerId,
+                    type: 'client_input_update', senderId: localPlayerId,
                     payload: {
-                        x: localPlayer.x,
-                        y: localPlayer.y,
-                        vx: localPlayer.vx,
-                        vy: localPlayer.vy,
-                        isGrounded: localPlayer.isGrounded,
-                        facingRight: localPlayer.facingRight,
-                        isDashing: localPlayer.isDashing,
-                        handAngle: calculateHandAngle(localPlayer)
+                        x: localPlayer.x, y: localPlayer.y, vx: localPlayer.vx, vy: localPlayer.vy,
+                        isGrounded: localPlayer.isGrounded, facingRight: localPlayer.facingRight,
+                        isDashing: localPlayer.isDashing, handAngle: calculateHandAngle(localPlayer)
                     }
                 });
             }
-
-            // Update world items (only needed on host, but we can run locally for visuals)
             if (itemManager) {
-                itemManager.update(); // update respawn timers (host also runs this)
-
-                // For host: pick up items directly (no network request)
+                itemManager.update();
                 if (isHost && localPlayer) {
-                    const pickedItem = itemManager.checkPickup(localPlayer);
-                    if (pickedItem) {
-                        players[localPlayerId].item = pickedItem;
+                    const picked = itemManager.checkPickup(localPlayer);
+                    if (picked) {
+                        players[localPlayerId].item = picked;
                         players[localPlayerId].itemType = 'pistol';
-                        localPlayerItem = pickedItem;
+                        players[localPlayerId].ammo = picked.ammo;
+                        localPlayerItem = picked;
                         broadcastToRoom('sync_players', { allPlayers: players });
                         broadcastWorldItems();
                         playSound('gem');
                     }
-                }
-                // For clients: send request when touching an available item
-                else if (!isHost && localPlayer) {
+                } else if (!isHost && localPlayer) {
                     for (let wi of itemManager.worldItems) {
                         if (wi.isAvailable && checkCollision(localPlayer, wi)) {
-                            hostConnection.send({
-                                type: 'request_pickup_item',
-                                senderId: localPlayerId
-                            });
+                            hostConnection.send({ type: 'request_pickup_item', senderId: localPlayerId });
                             break;
                         }
                     }
                 }
             }
-
-            // Update local player's item cooldown
-            if (localPlayerItem) {
-                localPlayerItem.update();
+            if (keys.Drop && !wasDropPressed) {
+                if (localPlayer.item) {
+                    if (!isHost && hostConnection?.open) {
+                        // Client: if empty pistol, show break effect immediately
+                        if (localPlayer.item.ammo !== undefined && localPlayer.item.ammo === 0) {
+                            spawnBreakParticles(localPlayer.x + localPlayer.width / 2, localPlayer.y + localPlayer.height / 2);
+                            // Optimistically clear local item
+                            localPlayer.item = null;
+                            localPlayer.itemType = null;
+                            localPlayer.ammo = 0;
+                            localPlayerItem = null;
+                        }
+                        hostConnection.send({ type: 'request_drop_item', senderId: localPlayerId });
+                    } else if (isHost) {
+                        hostDropItem(localPlayerId);
+                    }
+                }
             }
-
-            // Camera calculations naturally adjust with smooth interpolation
+            wasDropPressed = keys.Drop;
+            if (localPlayerItem) localPlayerItem.update();
             camera.zoom += (camera.targetZoom - camera.zoom) * 0.1 * dt;
-
             let targetCamX = (localPlayer.x + localPlayer.width / 2) - (BASE_WIDTH / 2) / camera.zoom;
             let targetCamY = (localPlayer.y + localPlayer.height / 2) - (BASE_HEIGHT / 2) / camera.zoom;
-
-            let maxCamX = BASE_WIDTH - BASE_WIDTH / camera.zoom;
-            let maxCamY = BASE_HEIGHT - BASE_HEIGHT / camera.zoom;
-            targetCamX = Math.max(0, Math.min(targetCamX, maxCamX));
-            targetCamY = Math.max(0, Math.min(targetCamY, maxCamY));
-
+            let maxX = BASE_WIDTH - BASE_WIDTH / camera.zoom, maxY = BASE_HEIGHT - BASE_HEIGHT / camera.zoom;
+            targetCamX = Math.max(0, Math.min(targetCamX, maxX));
+            targetCamY = Math.max(0, Math.min(targetCamY, maxY));
             camera.x += (targetCamX - camera.x) * 0.1 * dt;
             camera.y += (targetCamY - camera.y) * 0.1 * dt;
         } else {
-            camera.zoom = 1.0;
-            camera.x = 0;
-            camera.y = 0;
+            camera.zoom = 1; camera.x = camera.y = 0;
         }
-
-        // Update projectiles
+        // bullets
         for (let i = 0; i < projectiles.length; i++) {
             const p = projectiles[i];
-            p.x += p.vx * dt;
-            p.y += p.vy * dt;
-            p.life -= dt;
-            if (p.life <= 0) {
-                projectiles.splice(i, 1);
-                i--;
-                continue;
+            p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+            if (p.life <= 0) { projectiles.splice(i, 1); i--; continue; }
+            const out = p.x - p.radius < 0 || p.x + p.radius > BASE_WIDTH || p.y - p.radius < 0 || p.y + p.radius > BASE_HEIGHT;
+            if (out) {
+                for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 });
+                projectiles.splice(i, 1); i--; continue;
             }
-
-            // Collision with players (excluding owner)
+            let solid = false;
+            for (let plat of platforms) if (p.x + p.radius > plat.x && p.x - p.radius < plat.x + plat.w && p.y + p.radius > plat.y && p.y - p.radius < plat.y + plat.h) { solid = true; break; }
+            if (solid) { for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 }); projectiles.splice(i, 1); i--; continue; }
+            for (let h of hazards) if (p.x + p.radius > h.x && p.x - p.radius < h.x + h.w && p.y + p.radius > h.y && p.y - p.radius < h.y + h.h) { solid = true; break; }
+            if (solid) { for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 }); projectiles.splice(i, 1); i--; continue; }
             for (let id in players) {
                 if (id === p.ownerId) continue;
-                const target = players[id];
-                const dx = p.x - (target.x + target.width / 2);
-                const dy = p.y - (target.y + target.height / 2);
-                const dist = Math.hypot(dx, dy);
-                if (dist < p.radius + target.width / 2) {
+                const t = players[id];
+                const dx = p.x - (t.x + t.width / 2), dy = p.y - (t.y + t.height / 2);
+                if (Math.hypot(dx, dy) < p.radius + t.width / 2) {
                     const angle = Math.atan2(p.vy, p.vx);
-                    target.vx += Math.cos(angle) * p.knockback;
-                    target.vy += Math.sin(angle) * p.knockback;
-                    projectiles.splice(i, 1);
-                    i--;
-                    playSound('spike');
-                    break;
+                    t.vx += Math.cos(angle) * p.knockback;
+                    t.vy += Math.sin(angle) * p.knockback;
+                    projectiles.splice(i, 1); i--; playSound('spike'); break;
                 }
             }
         }
-
-        // Broadcast projectiles to all clients (host only)
-        if (isHost) {
-            broadcastProjectiles();
+        // throwables
+        for (let i = 0; i < throwables.length; i++) {
+            const t = throwables[i];
+            t.vy += THROWABLE_GRAVITY * dt;
+            t.angularSpeed *= 0.996;
+            t.x += t.vx * dt; t.y += t.vy * dt;
+            t.life -= dt; t.angle += t.angularSpeed * dt;
+            if (t.life <= 0) {
+                itemManager.spawnItem(t.x - 12, t.y - 12, t.itemType, 0, false, t.ammo);
+                broadcastWorldItems();
+                throwables.splice(i, 1); i--; continue;
+            }
+            let bounced = false;
+            if (t.x - t.radius < 0) { t.x = t.radius; t.vx = -t.vx * 0.4; t.angularSpeed = -t.angularSpeed * 0.8 + (Math.random() - 0.5) * 0.1; bounced = true; }
+            if (t.x + t.radius > BASE_WIDTH) { t.x = BASE_WIDTH - t.radius; t.vx = -t.vx * 0.4; bounced = true; }
+            if (t.y - t.radius < 0) { t.y = t.radius; t.vy = -t.vy * 0.4; bounced = true; }
+            if (t.y + t.radius > BASE_HEIGHT) { t.y = BASE_HEIGHT - t.radius; t.vy = -t.vy * 0.4; bounced = true; }
+            if (bounced) continue;
+            let hitPlatform = false;
+            for (let plat of platforms) {
+                if (t.x + t.radius > plat.x && t.x - t.radius < plat.x + plat.w && t.y + t.radius > plat.y && t.y - t.radius < plat.y + plat.h) {
+                    const left = t.x + t.radius - plat.x, right = plat.x + plat.w - (t.x - t.radius);
+                    const top = t.y + t.radius - plat.y, bottom = plat.y + plat.h - (t.y - t.radius);
+                    const minOver = Math.min(left, right, top, bottom);
+                    if (minOver === left || minOver === right) {
+                        t.vx = -t.vx * 0.7;
+                        if (minOver === left) t.x = plat.x - t.radius;
+                        else t.x = plat.x + plat.w + t.radius;
+                    } else {
+                        t.vy = -t.vy * 0.5; t.vx *= 0.92; t.angularSpeed *= 0.7;
+                        if (Math.abs(t.vx) < 0.2) t.vx = 0;
+                        if (minOver === top) t.y = plat.y - t.radius;
+                        else t.y = plat.y + plat.h + t.radius;
+                    }
+                    hitPlatform = true; break;
+                }
+            }
+            if (hitPlatform) continue;
+            let hitHazard = false;
+            for (let h of hazards) {
+                if (t.x + t.radius > h.x && t.x - t.radius < h.x + h.w && t.y + t.radius > h.y && t.y - t.radius < h.y + h.h) {
+                    const left = t.x + t.radius - h.x, right = h.x + h.w - (t.x - t.radius);
+                    const top = t.y + t.radius - h.y, bottom = h.y + h.h - (t.y - t.radius);
+                    const minOver = Math.min(left, right, top, bottom);
+                    if (minOver === left || minOver === right) {
+                        t.vx = -t.vx * 0.6; t.angularSpeed = -t.angularSpeed * 0.9;
+                        if (minOver === left) t.x = h.x - t.radius;
+                        else t.x = h.x + h.w + t.radius;
+                    } else {
+                        t.vy = -t.vy * 0.6;
+                        if (minOver === top) t.y = h.y - t.radius;
+                        else t.y = h.y + h.h + t.radius;
+                    }
+                    hitHazard = true; break;
+                }
+            }
+            if (hitHazard) continue;
+            for (let id in players) {
+                if (id === t.ownerId) continue;
+                const target = players[id];
+                const dx = t.x - (target.x + target.width / 2), dy = t.y - (target.y + target.height / 2);
+                const dist = Math.hypot(dx, dy);
+                if (dist < t.radius + target.width / 2) {
+                    if (t.dropItem) {
+                        const angle = Math.atan2(t.vy, t.vx);
+                        t.vx = Math.cos(angle) * Math.abs(t.vx) * 0.5;
+                        t.vy = Math.sin(angle) * Math.abs(t.vy) * 0.5;
+                        const pushX = dx / dist * (t.radius + target.width / 2);
+                        const pushY = dy / dist * (t.radius + target.height / 2);
+                        t.x += pushX * 0.5; t.y += pushY * 0.5;
+                        continue;
+                    } else {
+                        const angle = Math.atan2(t.vy, t.vx);
+                        target.vx += Math.cos(angle) * 15;
+                        target.vy += Math.sin(angle) * 15;
+                        const dropX = target.x + target.width / 2 - 12;
+                        const dropY = target.y + target.height - 12;
+                        itemManager.spawnItem(dropX, dropY, t.itemType, 0, false, t.ammo);
+                        broadcastWorldItems();
+                        throwables.splice(i, 1); i--;
+                        playSound('spike'); break;
+                    }
+                }
+            }
         }
-
-        ctx.save();
-        ctx.scale(camera.zoom, camera.zoom);
-        ctx.translate(-camera.x, -camera.y);
-
+        if (isHost) broadcastThrowables();
+        if (isHost) broadcastProjectiles();
+        ctx.save(); ctx.scale(camera.zoom, camera.zoom); ctx.translate(-camera.x, -camera.y);
         drawCanvasLevelLayout();
-        updateAndRenderParticles(); // These can continue running visually frame-by-frame
-
+        updateAndRenderParticles();
         for (let id in players) {
             let p = players[id];
-
             if (p.isDashing) {
-                for (let i = 0; i < 2; i++) {
-                    particles.push({
-                        x: p.x + (p.facingRight ? 0 : p.width),
-                        y: p.y + Math.random() * p.height,
-                        vx: (p.facingRight ? -3 : 3) + (Math.random() - 0.5),
-                        vy: (Math.random() - 0.5) * 1,
-                        alpha: 1,
-                        size: Math.random() * 5 + 4,
-                        color: p.color
-                    });
-                }
+                for (let i = 0; i < 2; i++) particles.push({
+                    x: p.x + (p.facingRight ? 0 : p.width), y: p.y + Math.random() * p.height,
+                    vx: (p.facingRight ? -3 : 3) + (Math.random() - 0.5), vy: (Math.random() - 0.5) * 1, alpha: 1, size: Math.random() * 5 + 4, color: p.color
+                });
             }
             drawCharacterModel(p);
-
-            // --- CRITICAL UPDATE: PRIVATE POV DASH COOLDOWN INDICATOR ---
-            // Evaluates natively on each client; only renders if the loop ID matches your own connection
-            if (id === localPlayerId) {
-                drawDashCooldownBar(p);
-            }
+            if (id === localPlayerId) drawDashCooldownBar(p);
         }
-
-        // --- INTERACTIVE SKIN DOOR DETECTION PROMPT (drawn in world space) ---
-        drawSkinDoorUI();
-
-        // --- INTERACTIVE START DOOR DETECTION PROMPT (drawn in world space) ---
-        drawStartDoorUI();
-
+        drawSkinDoorUI(); drawStartDoorUI();
         ctx.restore();
-
         drawOffscreenRadarIndicators();
-
-        // Draw countdown in screen space (not affected by camera transforms)
         if (lobbyCountdownVal >= 0) {
-            ctx.fillStyle = '#ff007f';
-            ctx.font = 'bold 36px "Orbitron"';
-            ctx.textAlign = 'center';
-            ctx.shadowColor = '#ff007f';
-            ctx.shadowBlur = 15;
+            ctx.fillStyle = '#ff007f'; ctx.font = 'bold 36px "Orbitron"'; ctx.textAlign = 'center';
+            ctx.shadowColor = '#ff007f'; ctx.shadowBlur = 15;
             ctx.fillText(`MATCH STARTING IN: ${lobbyCountdownVal}s`, canvas.width / 2, 60);
             ctx.shadowBlur = 0;
         }
-
-        // Draw race countdown in screen space
         if (raceCountdownVal > 0 && currentEngineMode === 'GAME') {
-            ctx.fillStyle = '#00ff66';
-            ctx.font = 'bold 48px "Orbitron"';
-            ctx.textAlign = 'center';
-            ctx.shadowColor = '#00ff66';
-            ctx.shadowBlur = 20;
+            ctx.fillStyle = '#00ff66'; ctx.font = 'bold 48px "Orbitron"'; ctx.textAlign = 'center';
+            ctx.shadowColor = '#00ff66'; ctx.shadowBlur = 20;
             ctx.fillText(`${raceCountdownVal}s`, canvas.width / 2, canvas.height / 2);
             ctx.shadowBlur = 0;
         }
-
     } else {
-        ctx.fillStyle = '#110924';
-        ctx.font = '20px "Orbitron"';
-        ctx.textAlign = 'center';
+        ctx.fillStyle = '#110924'; ctx.font = '20px "Orbitron"'; ctx.textAlign = 'center';
         ctx.fillText("WAITING IN PLATFORM MENU...", canvas.width / 2, canvas.height / 2);
     }
-
     requestAnimationFrame(enginePipelineTick);
 }
 
-// Hardware Input Mapping Events
+// ============================================================================
+//  INPUT HANDLING
+// ============================================================================
+
 window.addEventListener('keydown', (e) => {
     if (['ArrowLeft', 'a', 'A'].includes(e.key)) keys.ArrowLeft = true;
     if (['ArrowRight', 'd', 'D'].includes(e.key)) keys.ArrowRight = true;
     if (['ArrowUp', 'w', 'W', ' '].includes(e.key)) keys.ArrowUp = true;
     if (['f', 'F'].includes(e.key)) keys.Interact = true;
-    if (e.code === 'ShiftLeft') keys.ShiftLeft = true; // NEW: Map physical Left Shift
+    if (e.key === 'q' || e.key === 'Q') keys.Drop = true;
+    if (e.code === 'ShiftLeft') keys.ShiftLeft = true;
 });
-
 window.addEventListener('keyup', (e) => {
     if (['ArrowLeft', 'a', 'A'].includes(e.key)) keys.ArrowLeft = false;
     if (['ArrowRight', 'd', 'D'].includes(e.key)) keys.ArrowRight = false;
     if (['ArrowUp', 'w', 'W', ' '].includes(e.key)) keys.ArrowUp = false;
     if (['f', 'F'].includes(e.key)) keys.Interact = false;
-    if (e.code === 'ShiftLeft') keys.ShiftLeft = false; // NEW: Release physical Left Shift
+    if (e.key === 'q' || e.key === 'Q') keys.Drop = false;
+    if (e.code === 'ShiftLeft') keys.ShiftLeft = false;
 });
-
-// NEW: Mouse Observers for Viewport Toggle
-window.addEventListener('mousedown', (e) => {
-    if (e.button === 1) { // 1 is the Middle Mouse Button
-        e.preventDefault();
-        camera.isZoomed = !camera.isZoomed;
-        camera.targetZoom = camera.isZoomed ? 1.75 : 1.0; // 1.75x close up focus zoom
-    }
-});
-
-// NEW: Dynamic Scroll Wheel Zoom Observers
+window.addEventListener('mousedown', (e) => { if (e.button === 1) { e.preventDefault(); camera.isZoomed = !camera.isZoomed; camera.targetZoom = camera.isZoomed ? 1.75 : 1.0; } });
 window.addEventListener('wheel', (e) => {
-    // Only capture zoom adjustments if the game is active
     if (currentEngineMode === 'LOBBY' || currentEngineMode === 'GAME') {
-        e.preventDefault(); // Stop the browser from scrolling the web page
-
-        const zoomSensitivity = 0.15; // Tuning variable for increment speed per notch
-
-        if (e.deltaY < 0) {
-            // Rolling Up -> Zoom In closer to character
-            camera.targetZoom = Math.min(camera.maxZoom, camera.targetZoom + zoomSensitivity);
-        } else if (e.deltaY > 0) {
-            // Rolling Down -> Zoom Out back toward full overview
-            camera.targetZoom = Math.max(camera.minZoom, camera.targetZoom - zoomSensitivity);
-        }
+        e.preventDefault();
+        const sens = 0.15;
+        if (e.deltaY < 0) camera.targetZoom = Math.min(camera.maxZoom, camera.targetZoom + sens);
+        else if (e.deltaY > 0) camera.targetZoom = Math.max(camera.minZoom, camera.targetZoom - sens);
     }
 }, { passive: false });
-
-// Keep this to prevent default middle-click scroll anchor popups from disrupting focus
-window.addEventListener('pointerdown', (e) => {
-    if (e.button === 1) e.preventDefault();
-});
-
+window.addEventListener('pointerdown', (e) => { if (e.button === 1) e.preventDefault(); });
 canvas.addEventListener('mousedown', (e) => {
     if (currentEngineMode !== 'LOBBY' && currentEngineMode !== 'GAME') return;
     if (e.button !== 0) return;
     if (!localPlayerItem) return;
-
-    // Check cooldown locally (but we also send the shoot request)
     if (!localPlayerItem.canUse()) return;
 
+    // Check ammo (pistol only)
+    if (localPlayerItem.ammo !== undefined && localPlayerItem.ammo <= 0) return;
+
     if (isHost) {
-        // Host: use locally
         const used = localPlayerItem.onUse(players[localPlayerId], { projectiles });
-        if (used) playSound('door');
+        if (used) {
+            playSound('door');
+            players[localPlayerId].ammo = localPlayerItem.ammo;
+            broadcastToRoom('sync_players', { allPlayers: players });
+        }
     } else {
-        // Client: send shoot request to host
+        // Client: decrement locally and send updated ammo
+        if (localPlayerItem.ammo !== undefined) {
+            localPlayerItem.ammo--;
+            players[localPlayerId].ammo = localPlayerItem.ammo;
+        }
         const angle = calculateHandAngle(players[localPlayerId]);
         hostConnection.send({
             type: 'client_shoot',
             senderId: localPlayerId,
-            payload: { handAngle: angle }
+            payload: { handAngle: angle, ammo: localPlayerItem.ammo }
         });
-        // Immediately apply cooldown locally to prevent spamming
         localPlayerItem.cooldown = localPlayerItem.cooldownMax;
-        // Optionally play sound locally
         playSound('door');
     }
 });
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('mousedown', (e) => {
+    if (e.button === 2 && players[localPlayerId] && players[localPlayerId].item) {
+        e.preventDefault();
+        const angle = calculateHandAngle(players[localPlayerId]);
+        if (!isHost && hostConnection?.open) hostConnection.send({ type: 'request_throw_item', senderId: localPlayerId, payload: { angle } });
+        else if (isHost) hostThrowItem(localPlayerId, angle);
+    }
+});
 
-function bindTouchBtn(elementId, action) {
-    const el = document.getElementById(elementId);
+function bindTouchBtn(id, action) {
+    const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener('touchstart', (e) => { e.preventDefault(); touchState[action] = true; });
     el.addEventListener('touchend', (e) => { e.preventDefault(); touchState[action] = false; });
     el.addEventListener('touchcancel', (e) => { e.preventDefault(); touchState[action] = false; });
 }
-bindTouchBtn('btn-left', 'left');
-bindTouchBtn('btn-right', 'right');
-bindTouchBtn('btn-jump', 'jump');
+bindTouchBtn('btn-left', 'left'); bindTouchBtn('btn-right', 'right'); bindTouchBtn('btn-jump', 'jump');
 
-// Color Management Matrix Selection Triggers
+// ============================================================================
+//  SKIN MENU & COLOR SELECTION
+// ============================================================================
+
 function selectCharacterColor(hexColor, buttonElement) {
-    if (players[localPlayerId] && players[localPlayerId].color === hexColor) {
-        return;
-    }
-
-    // Check if color is already taken by another player
-    const isColorTaken = isColorAlreadyUsed(hexColor, localPlayerId);
-    if (isColorTaken) {
-        return; // Prevent selection of taken colors
-    }
-
+    if (players[localPlayerId] && players[localPlayerId].color === hexColor) return;
+    if (isColorAlreadyUsed(hexColor, localPlayerId)) return;
     if (players[localPlayerId]) {
         players[localPlayerId].color = hexColor;
-
-        if (isHost) {
-            // Host propagates changes outwards directly
-            broadcastToRoom('sync_players', { allPlayers: players });
-        } else if (hostConnection && hostConnection.open) {
-            // Guests pass changes upwards through data stream pipes
-            hostConnection.send({
-                type: 'update_skin',
-                senderId: localPlayerId,
-                payload: { color: hexColor }
-            });
-        }
+        if (isHost) broadcastToRoom('sync_players', { allPlayers: players });
+        else if (hostConnection?.open) hostConnection.send({ type: 'update_skin', senderId: localPlayerId, payload: { color: hexColor } });
     }
-
-    // --- VISUAL SELECTION INDICATION ---
     if (buttonElement) {
-        // 1. Reset all buttons back to transparent borders
         document.querySelectorAll('.color-btn').forEach(btn => {
-            btn.classList.remove('border-white', 'scale-105');
-            btn.classList.add('border-transparent');
+            btn.classList.remove('border-white', 'scale-105'); btn.classList.add('border-transparent');
         });
-
-        // 2. Highlight only the one the user just clicked
-        buttonElement.classList.remove('border-transparent');
-        buttonElement.classList.add('border-white', 'scale-105');
+        buttonElement.classList.remove('border-transparent'); buttonElement.classList.add('border-white', 'scale-105');
     }
-
-    // Optional: Leave this commented out if you want players to see 
-    // their selection border active before they choose to close the menu.
-    // closeSkinMenu();
 }
 
-function broadcastWorldItems() {
-    if (!isHost) return;
-    const itemsData = itemManager.worldItems.map(item => ({
-        x: item.x, y: item.y, itemType: item.itemType,
-        isAvailable: item.isAvailable, respawnTimer: item.respawnTimer
-    }));
-    broadcastToRoom('sync_world_items', { items: itemsData });
-}
-
-function isColorAlreadyUsed(hexColor, excludePlayerId) {
-    if (!hexColor) return false;
-    const cleanHexColor = hexColor.trim().toLowerCase();
-
-    for (let id in players) {
-        if (id !== excludePlayerId && players[id] && players[id].color) {
-            const cleanPlayerColor = players[id].color.trim().toLowerCase();
-            if (cleanPlayerColor === cleanHexColor) {
-                return true;
-            }
-        }
-    }
+function isColorAlreadyUsed(hex, excludeId) {
+    if (!hex) return false;
+    const clean = hex.trim().toLowerCase();
+    for (let id in players) if (id !== excludeId && players[id]?.color?.trim().toLowerCase() === clean) return true;
     return false;
 }
 
-// Update color button states based on which colors are taken by OTHER players
 function updateColorButtonStates() {
-    const localColor = players[localPlayerId]?.color?.trim().toLowerCase();
-
+    const local = players[localPlayerId]?.color?.trim().toLowerCase();
     document.querySelectorAll('.color-btn').forEach(btn => {
-        const btnColorRaw = btn.getAttribute('data-color');
-        if (!btnColorRaw) return;
-        const btnColor = btnColorRaw.trim().toLowerCase();
-
-        // If this is the local player's color, keep it highlighted and enabled
-        if (localColor && btnColor === localColor) {
-            btn.classList.remove('disabled-color', 'border-transparent');
-            btn.classList.add('border-white', 'scale-105');
-            btn.style.pointerEvents = 'auto';
-            return;
-        }
-
-        // Mark as taken only if another player uses it
-        const takenByOther = isColorAlreadyUsed(btnColor, localPlayerId);
-        if (takenByOther) {
-            btn.classList.add('disabled-color');
-            btn.classList.remove('border-white', 'scale-105');
-            btn.classList.add('border-transparent');
-            btn.style.pointerEvents = 'none';
+        const raw = btn.getAttribute('data-color');
+        if (!raw) return;
+        const col = raw.trim().toLowerCase();
+        if (local && col === local) {
+            btn.classList.remove('disabled-color', 'border-transparent'); btn.classList.add('border-white', 'scale-105'); btn.style.pointerEvents = 'auto';
+        } else if (isColorAlreadyUsed(col, localPlayerId)) {
+            btn.classList.add('disabled-color'); btn.classList.remove('border-white', 'scale-105'); btn.classList.add('border-transparent'); btn.style.pointerEvents = 'none';
         } else {
-            btn.classList.remove('disabled-color');
-            btn.classList.remove('border-white', 'scale-105');
-            btn.classList.add('border-transparent');
-            btn.style.pointerEvents = 'auto';
+            btn.classList.remove('disabled-color'); btn.classList.remove('border-white', 'scale-105'); btn.classList.add('border-transparent'); btn.style.pointerEvents = 'auto';
         }
     });
 }
 
-
 function openSkinMenu() {
-    console.log('openSkinMenu called');
-
     const modal = document.getElementById('skin-modal');
-    console.log('skin-modal element:', modal);
-
-    try {
-        if (modal) modal.classList.remove('hidden');
-    } catch (err) {
-        console.error('error toggling modal class:', err);
-    }
-
-    // 1: mark taken colors
-    if (typeof updateColorButtonStates === 'function') {
-        console.log('calling updateColorButtonStates');
-        try { updateColorButtonStates(); } catch (err) { console.error('updateColorButtonStates error', err); }
-    } else {
-        console.warn('updateColorButtonStates is not defined');
-    }
-
-    // 2: highlight local player's color
-    console.log('localPlayerId:', localPlayerId);
-    console.log('players object keys:', Object.keys(players || {}));
-    const currentColor = players[localPlayerId]?.color;
-    console.log('currentColor raw:', currentColor);
-
-    if (currentColor) {
-        const normalized = currentColor.trim().toLowerCase();
+    if (modal) modal.classList.remove('hidden');
+    if (typeof updateColorButtonStates === 'function') updateColorButtonStates();
+    const cur = players[localPlayerId]?.color;
+    if (cur) {
+        const norm = cur.trim().toLowerCase();
         document.querySelectorAll('.color-btn').forEach(btn => {
-            const btnColor = btn.getAttribute('data-color')?.trim().toLowerCase();
-            if (btnColor === normalized) {
-                console.log('highlighting button for color', btnColor, btn);
-                btn.classList.remove('border-transparent');
-                btn.classList.add('border-white', 'scale-105');
-                btn.style.pointerEvents = 'auto';
-            }
+            const col = btn.getAttribute('data-color')?.trim().toLowerCase();
+            if (col === norm) { btn.classList.remove('border-transparent'); btn.classList.add('border-white', 'scale-105'); btn.style.pointerEvents = 'auto'; }
         });
-    } else {
-        console.warn('no currentColor to highlight');
     }
-
-    console.log('openSkinMenu finished');
 }
+function closeSkinMenu() { document.getElementById('skin-modal').classList.add('hidden'); }
 
+// ============================================================================
+//  FACE DRAWING
+// ============================================================================
 
-
-function closeSkinMenu() {
-    document.getElementById('skin-modal').classList.add('hidden');
-}
-
-// ===== FACE DRAWING FUNCTIONALITY =====   
-let faceDrawingCanvas = null;
-let faceDrawingCtx = null;
-let faceOverlayCanvas = null;
-let faceOverlayCtx = null;
-let isDrawing = false;
-let currentDrawColor = '#FFFFFF';
-let currentBrushSize = 20;
-let faceImageData = null;
-let eraserActive = false;
-let lastPenColor = '#FFFFFF';       // stores the colour before eraser mode
-let faceCanvasBgColor = '#0c0516';  // background colour used for erasing
+let faceDrawingCanvas = null, faceDrawingCtx = null, faceOverlayCanvas = null, faceOverlayCtx = null;
+let isDrawingFace = false, currentDrawColorFace = '#FFFFFF', currentBrushSizeFace = 20;
+let eraserActiveFace = false, lastPenColorFace = '#FFFFFF', faceCanvasBgColor = '#0c0516';
 
 function initializeFaceCanvas() {
     faceDrawingCanvas = document.getElementById('faceDrawingCanvas');
     faceDrawingCtx = faceDrawingCanvas.getContext('2d');
-
-    // Create an off‑screen overlay canvas of the same size
     faceOverlayCanvas = document.createElement('canvas');
     faceOverlayCanvas.width = faceDrawingCanvas.width;
     faceOverlayCanvas.height = faceDrawingCanvas.height;
     faceOverlayCtx = faceOverlayCanvas.getContext('2d');
-
-    // Load saved face drawing onto the overlay, if any
-    const savedFace = localStorage.getItem('playerFaceDrawing_' + localPlayerId);
-    if (savedFace) {
+    const saved = localStorage.getItem('playerFaceDrawing_' + localPlayerId);
+    if (saved) {
         const img = new Image();
-        img.onload = () => {
-            faceOverlayCtx.drawImage(img, 0, 0);
-            compositeLayers();
-        };
-        img.src = savedFace;
-    } else {
-        // start with a clean overlay
-        faceOverlayCtx.clearRect(0, 0, faceOverlayCanvas.width, faceOverlayCanvas.height);
-        compositeLayers();
-    }
-
-    // Draw the static background (character color + circle outline)
+        img.onload = () => { faceOverlayCtx.drawImage(img, 0, 0); compositeLayers(); };
+        img.src = saved;
+    } else { faceOverlayCtx.clearRect(0, 0, faceOverlayCanvas.width, faceOverlayCanvas.height); compositeLayers(); }
     drawFaceCanvasBackground();
-
-    // Drawing event listeners (now draw on the overlay)
-    let isDrawing = false;
-
-    function getCanvasCoords(e) {
+    function getCoords(e) {
         const rect = faceDrawingCanvas.getBoundingClientRect();
-        const scaleX = faceDrawingCanvas.width / rect.width;
-        const scaleY = faceDrawingCanvas.height / rect.height;
-        let clientX, clientY;
-        if (e.touches) {
-            clientX = e.touches[0].clientX;
-            clientY = e.touches[0].clientY;
-        } else {
-            clientX = e.clientX;
-            clientY = e.clientY;
-        }
-        const canvasX = (clientX - rect.left) * scaleX;
-        const canvasY = (clientY - rect.top) * scaleY;
-        return { x: Math.max(0, Math.min(canvasX, faceDrawingCanvas.width)), y: Math.max(0, Math.min(canvasY, faceDrawingCanvas.height)) };
+        const sx = faceDrawingCanvas.width / rect.width, sy = faceDrawingCanvas.height / rect.height;
+        let cx, cy;
+        if (e.touches) { cx = e.touches[0].clientX; cy = e.touches[0].clientY; }
+        else { cx = e.clientX; cy = e.clientY; }
+        return { x: Math.max(0, Math.min(faceDrawingCanvas.width, (cx - rect.left) * sx)), y: Math.max(0, Math.min(faceDrawingCanvas.height, (cy - rect.top) * sy)) };
     }
-
-    function startDrawing(e) {
-        e.preventDefault();
-        isDrawing = true;
-        const { x, y } = getCanvasCoords(e);
-        faceOverlayCtx.beginPath();
-        faceOverlayCtx.moveTo(x, y);
-        // Apply current drawing mode (pen or eraser)
-        applyDrawingMode();
+    function start(e) { e.preventDefault(); isDrawingFace = true; const { x, y } = getCoords(e); faceOverlayCtx.beginPath(); faceOverlayCtx.moveTo(x, y); applyMode(); }
+    function draw(e) { if (!isDrawingFace) return; e.preventDefault(); const { x, y } = getCoords(e); faceOverlayCtx.lineTo(x, y); faceOverlayCtx.stroke(); compositeLayers(); }
+    function stop() { isDrawingFace = false; faceOverlayCtx.beginPath(); }
+    function applyMode() {
+        if (eraserActiveFace) { faceOverlayCtx.globalCompositeOperation = 'destination-out'; faceOverlayCtx.strokeStyle = 'rgba(0,0,0,1)'; }
+        else { faceOverlayCtx.globalCompositeOperation = 'source-over'; faceOverlayCtx.strokeStyle = currentDrawColorFace; }
+        faceOverlayCtx.lineWidth = currentBrushSizeFace; faceOverlayCtx.lineCap = 'round'; faceOverlayCtx.lineJoin = 'round';
     }
-
-    function draw(e) {
-        if (!isDrawing) return;
-        e.preventDefault();
-        const { x, y } = getCanvasCoords(e);
-        faceOverlayCtx.lineTo(x, y);
-        faceOverlayCtx.stroke();
-        compositeLayers();
-    }
-
-    function stopDrawing() {
-        isDrawing = false;
-        faceOverlayCtx.beginPath();
-    }
-
-    function applyDrawingMode() {
-        if (eraserActive) {
-            faceOverlayCtx.globalCompositeOperation = 'destination-out';
-            faceOverlayCtx.strokeStyle = 'rgba(0,0,0,1)'; // color doesn't matter, destination-out ignores it
-        } else {
-            faceOverlayCtx.globalCompositeOperation = 'source-over';
-            faceOverlayCtx.strokeStyle = currentDrawColor;
-        }
-        faceOverlayCtx.lineWidth = currentBrushSize;
-        faceOverlayCtx.lineCap = 'round';
-        faceOverlayCtx.lineJoin = 'round';
-    }
-
-    // Add event listeners for mouse and touch
-    faceDrawingCanvas.addEventListener('mousedown', startDrawing);
-    faceDrawingCanvas.addEventListener('mousemove', draw);
-    faceDrawingCanvas.addEventListener('mouseup', stopDrawing);
-    faceDrawingCanvas.addEventListener('mouseleave', stopDrawing);
-    faceDrawingCanvas.addEventListener('touchstart', startDrawing);
-    faceDrawingCanvas.addEventListener('touchmove', draw);
-    faceDrawingCanvas.addEventListener('touchend', stopDrawing);
+    faceDrawingCanvas.addEventListener('mousedown', start); faceDrawingCanvas.addEventListener('mousemove', draw);
+    faceDrawingCanvas.addEventListener('mouseup', stop); faceDrawingCanvas.addEventListener('mouseleave', stop);
+    faceDrawingCanvas.addEventListener('touchstart', start); faceDrawingCanvas.addEventListener('touchmove', draw); faceDrawingCanvas.addEventListener('touchend', stop);
 }
-
-function compositeLayers() {
-    if (!faceDrawingCtx || !faceOverlayCtx) return;
-    // Clear main canvas and draw background
-    drawFaceCanvasBackground();
-    // Draw overlay on top
-    faceDrawingCtx.drawImage(faceOverlayCanvas, 0, 0);
-}
-
+function compositeLayers() { if (!faceDrawingCtx || !faceOverlayCtx) return; drawFaceCanvasBackground(); faceDrawingCtx.drawImage(faceOverlayCanvas, 0, 0); }
 function drawFaceCanvasBackground() {
     if (!faceDrawingCtx) return;
-    const characterColor = (players && players[localPlayerId]) ? players[localPlayerId].color : '#0c0516';
-    faceDrawingCtx.fillStyle = characterColor;
-    faceDrawingCtx.fillRect(0, 0, faceDrawingCanvas.width, faceDrawingCanvas.height);
-    // Draw circle outline
-    faceDrawingCtx.strokeStyle = '#ffffff';
-    faceDrawingCtx.lineWidth = 2;
-    faceDrawingCtx.beginPath();
-    faceDrawingCtx.arc(faceDrawingCanvas.width / 2, faceDrawingCanvas.height / 2, faceDrawingCanvas.width / 2 - 2, 0, Math.PI * 2);
-    faceDrawingCtx.stroke();
+    const col = (players && players[localPlayerId]) ? players[localPlayerId].color : '#0c0516';
+    faceDrawingCtx.fillStyle = col; faceDrawingCtx.fillRect(0, 0, faceDrawingCanvas.width, faceDrawingCanvas.height);
+    faceDrawingCtx.strokeStyle = '#fff'; faceDrawingCtx.lineWidth = 2;
+    faceDrawingCtx.beginPath(); faceDrawingCtx.arc(faceDrawingCanvas.width / 2, faceDrawingCanvas.height / 2, faceDrawingCanvas.width / 2 - 2, 0, Math.PI * 2); faceDrawingCtx.stroke();
 }
-
-function toggleEraser() {
-    const eraserBtn = document.getElementById('eraserBtn');
-    if (!eraserActive) {
-        eraserActive = true;
-        lastPenColor = currentDrawColor;
-        if (eraserBtn) {
-            eraserBtn.style.backgroundColor = '#ff007f';
-            eraserBtn.style.color = 'white';
-            eraserBtn.innerText = '✏️ PEN MODE';
-        }
-    } else {
-        deactivateEraser();
-    }
-    // Re‑apply drawing mode for the next stroke
-    if (faceOverlayCtx) applyDrawingMode();
+function toggleEraserFace() {
+    const btn = document.getElementById('eraserBtn');
+    if (!eraserActiveFace) { eraserActiveFace = true; lastPenColorFace = currentDrawColorFace; currentDrawColorFace = faceCanvasBgColor; if (btn) { btn.style.backgroundColor = '#ff007f'; btn.style.color = 'white'; btn.innerText = '✏️ PEN MODE'; } }
+    else deactivateEraserFace();
+    if (faceOverlayCtx) applyMode();
 }
-
-function deactivateEraser() {
-    eraserActive = false;
-    currentDrawColor = lastPenColor;
-    const eraserBtn = document.getElementById('eraserBtn');
-    if (eraserBtn) {
-        eraserBtn.style.backgroundColor = '';
-        eraserBtn.style.color = '#ff007f';
-        eraserBtn.innerText = '🧽 ERASER MODE';
-    }
-    if (faceOverlayCtx) applyDrawingMode();
-}
-
-function setDrawColor(color) {
-    if (eraserActive) deactivateEraser();
-    currentDrawColor = color;
-}
-
-function setBrushSize(size) {
-    currentBrushSize = parseInt(size);
-}
-
-function toggleEraser() {
-    const eraserBtn = document.getElementById('eraserBtn');
-    if (!eraserActive) {
-        // Switch to eraser mode
-        eraserActive = true;
-        lastPenColor = currentDrawColor;
-        currentDrawColor = faceCanvasBgColor;
-        if (eraserBtn) {
-            eraserBtn.style.backgroundColor = '#ff007f';
-            eraserBtn.style.color = 'white';
-            eraserBtn.style.borderColor = '#ff007f';
-            eraserBtn.innerText = '✏️ PEN MODE';
-        }
-    } else {
-        // Switch back to pen mode
-        deactivateEraser();
-    }
-}
-
-function deactivateEraser() {
-    eraserActive = false;
-    currentDrawColor = lastPenColor;
-    const eraserBtn = document.getElementById('eraserBtn');
-    if (eraserBtn) {
-        eraserBtn.style.backgroundColor = '';
-        eraserBtn.style.color = '#ff007f';
-        eraserBtn.style.borderColor = '#ff007f';
-        eraserBtn.innerText = '🧽 ERASER MODE';
-    }
-}
-
-function resetFaceDrawing() {
-    if (faceOverlayCtx) {
-        faceOverlayCtx.clearRect(0, 0, faceOverlayCanvas.width, faceOverlayCanvas.height);
-        compositeLayers();
-    }
-}
-
+function deactivateEraserFace() { eraserActiveFace = false; currentDrawColorFace = lastPenColorFace; const btn = document.getElementById('eraserBtn'); if (btn) { btn.style.backgroundColor = ''; btn.style.color = '#ff007f'; btn.innerText = '🧽 ERASER MODE'; } if (faceOverlayCtx) applyMode(); }
+function setDrawColorFace(col) { if (eraserActiveFace) deactivateEraserFace(); currentDrawColorFace = col; }
+function setBrushSizeFace(size) { currentBrushSizeFace = parseInt(size); document.getElementById('brushSizeDisplay').innerText = size; }
+function resetFaceDrawing() { if (faceOverlayCtx) { faceOverlayCtx.clearRect(0, 0, faceOverlayCanvas.width, faceOverlayCanvas.height); compositeLayers(); } }
 function saveFaceDrawing() {
-    // Save the overlay canvas data (pen strokes only)
-    const imageData = faceOverlayCanvas.toDataURL('image/png');
-    localStorage.setItem('playerFaceDrawing_' + localPlayerId, imageData);
+    const data = faceOverlayCanvas.toDataURL('image/png');
+    localStorage.setItem('playerFaceDrawing_' + localPlayerId, data);
     localStorage.setItem('playerHasCustomFace_' + localPlayerId, 'true');
-
-    // Broadcast to other players
-    if (isHost) {
-        broadcastToRoom('sync_face_drawing', { playerId: localPlayerId, faceData: imageData });
-    } else if (hostConnection && hostConnection.open) {
-        hostConnection.send({
-            type: 'update_face_drawing',
-            senderId: localPlayerId,
-            payload: { faceData: imageData }
-        });
-    }
-    closeFaceDrawing();
-    playSound('door');
+    if (isHost) broadcastToRoom('sync_face_drawing', { playerId: localPlayerId, faceData: data });
+    else if (hostConnection?.open) hostConnection.send({ type: 'update_face_drawing', senderId: localPlayerId, payload: { faceData: data } });
+    closeFaceDrawing(); playSound('door');
 }
+function openFaceDrawing() { document.getElementById('face-drawing-modal').classList.remove('hidden'); setTimeout(() => { if (!faceDrawingCanvas) initializeFaceCanvas(); else compositeLayers(); }, 10); }
+function closeFaceDrawing() { document.getElementById('face-drawing-modal').classList.add('hidden'); }
 
-function openFaceDrawing() {
-    document.getElementById('face-drawing-modal').classList.remove('hidden');
-    setTimeout(() => {
-        if (!faceDrawingCanvas) {
-            initializeFaceCanvas();
-        } else {
-            // Re‑composite to make sure everything is up‑to‑date
-            compositeLayers();
-        }
-    }, 10);
-}
+window.setDrawColor = setDrawColorFace;
+window.setBrushSize = setBrushSizeFace;
+window.toggleEraser = toggleEraserFace;
+window.resetFaceDrawing = resetFaceDrawing;
+window.saveFaceDrawing = saveFaceDrawing;
+window.openFaceDrawing = openFaceDrawing;
+window.closeFaceDrawing = closeFaceDrawing;
 
-function closeFaceDrawing() {
-    document.getElementById('face-drawing-modal').classList.add('hidden');
-}
-
-// ===== END FACE DRAWING FUNCTIONALITY =====
-
-// Initialization Start
 enginePipelineTick();

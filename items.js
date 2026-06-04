@@ -25,9 +25,7 @@ class UsableItem {
         ctx.translate(x, y);
 
         if (!facingRight) {
-            // Vertical flip (mirror over X-axis)
             ctx.scale(1, -1);
-            // Negate the angle to keep the item pointing in the correct direction
             angle = -angle;
         }
 
@@ -37,7 +35,6 @@ class UsableItem {
             const w = 24, h = 24;
             ctx.drawImage(this.image, -w / 2, -h / 2, w, h);
         } else {
-            // fallback (unchanged)
             ctx.fillStyle = '#aaa';
             ctx.fillRect(-10, -12, 20, 24);
             ctx.fillStyle = '#666';
@@ -56,30 +53,30 @@ class UsableItem {
 
     canUse() { return this.cooldown === 0; }
 
-    // Called when player uses the item
     onUse(player, gameState) {
         if (!this.canUse()) return false;
         this.cooldown = this.cooldownMax;
-        // Override in subclass
         return true;
     }
 }
 
 // ------------------------------------------------------------------
-// pistol Item – shoots projectile with knockback
+// pistol Item – shoots projectile with knockback, has ammo (3)
 // ------------------------------------------------------------------
 class pistolItem extends UsableItem {
-    constructor() {
-        super('pistol', 'assets/items/pistol.svg', 30);
+    constructor(ammo = 3) {
+        super('pistol', 'assets/items/pistol.svg', 45); // increased cooldown
         this.projectileSpeed = 12;
         this.projectileRadius = 6;
-        this.knockbackForce = 8;
+        this.knockbackForce = 15; // increased knockback
+        this.ammo = ammo;
+        this.maxAmmo = 3;
     }
 
     onUse(player, gameState) {
         if (!super.onUse(player, gameState)) return false;
+        if (this.ammo <= 0) return false;
 
-        // Spawn projectile from hand position
         const handX = player.x + player.width * 0.5;
         const handY = player.y + 32;
         const angle = player.handAngle !== undefined ? player.handAngle : (player.facingRight ? 0 : Math.PI);
@@ -100,6 +97,7 @@ class pistolItem extends UsableItem {
             knockback: this.knockbackForce
         };
         gameState.projectiles.push(projectile);
+        this.ammo--;
         return true;
     }
 }
@@ -108,29 +106,39 @@ class pistolItem extends UsableItem {
 // WorldItem – item entity lying on the ground
 // ------------------------------------------------------------------
 class WorldItem {
-    constructor(x, y, itemType) {
+    constructor(x, y, itemType, initialDelay = 0, shouldRespawn = true, ammo = 3) {
         this.x = x;
         this.y = y;
         this.w = 24;
         this.h = 24;
-        this.itemType = itemType;   // e.g., 'pistol'
+        this.itemType = itemType;
         this.respawnTimer = 0;
-        this.isAvailable = true;
+        this.pickupDelayTimer = initialDelay;
+        this.isAvailable = (initialDelay === 0);
+        this.shouldRespawn = shouldRespawn;
+        this.ammo = ammo;           // store ammo count
     }
 
-    // When player picks up, returns a new UsableItem instance
     pickup() {
         if (!this.isAvailable) return null;
         this.isAvailable = false;
-        this.respawnTimer = 300; // frames (~5 seconds at 60fps)
+        if (this.shouldRespawn) {
+            this.respawnTimer = 300;
+        }
         switch (this.itemType) {
-            case 'pistol': return new pistolItem();
+            case 'pistol': return new pistolItem(this.ammo);
             default: return null;
         }
     }
 
     update() {
-        if (!this.isAvailable) {
+        if (this.pickupDelayTimer > 0) {
+            this.pickupDelayTimer--;
+            if (this.pickupDelayTimer <= 0) {
+                this.isAvailable = true;
+            }
+        }
+        if (!this.isAvailable && this.pickupDelayTimer <= 0 && this.shouldRespawn) {
             this.respawnTimer--;
             if (this.respawnTimer <= 0) {
                 this.isAvailable = true;
@@ -139,23 +147,43 @@ class WorldItem {
     }
 
     draw(ctx, itemManager) {
-        if (!this.isAvailable) return;
+        if (!this.isAvailable && this.pickupDelayTimer <= 0 && this.shouldRespawn) return;
 
-        // Try to get the preview image from the item manager
+        const isCoolingDown = (this.pickupDelayTimer > 0);
         const previewImg = itemManager.getPreviewImage(this.itemType);
+
+        if (isCoolingDown) {
+            ctx.globalAlpha = 0.5;
+            ctx.shadowBlur = 0;
+        } else {
+            ctx.globalAlpha = 1;
+            ctx.shadowBlur = 8;
+            ctx.shadowColor = '#ffaa44';
+        }
+
         if (previewImg && previewImg.complete) {
             ctx.drawImage(previewImg, this.x, this.y, this.w, this.h);
         } else {
-            // Fallback: orange placeholder box with a '?'
             ctx.fillStyle = '#ffaa44';
-            ctx.shadowBlur = 8;
-            ctx.shadowColor = '#ffaa44';
             ctx.fillRect(this.x, this.y, this.w, this.h);
             ctx.fillStyle = '#ffffff';
             ctx.font = '12px monospace';
             ctx.fillText('?', this.x + this.w / 2 - 4, this.y + this.h / 2 + 4);
-            ctx.shadowBlur = 0;
         }
+
+        if (isCoolingDown) {
+            ctx.globalAlpha = 1;
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 14px "Orbitron", monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            const remainingSeconds = (this.pickupDelayTimer / 60).toFixed(1);
+            ctx.fillText(`${remainingSeconds}s`, this.x + this.w / 2, this.y - 5);
+        }
+
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 1;
     }
 }
 
@@ -176,9 +204,10 @@ class ItemManager {
 
     syncFromData(itemsData) {
         this.worldItems = itemsData.map(data => {
-            const item = new WorldItem(data.x, data.y, data.itemType);
+            const item = new WorldItem(data.x, data.y, data.itemType, data.pickupDelayTimer, data.shouldRespawn, data.ammo);
             item.isAvailable = data.isAvailable;
             item.respawnTimer = data.respawnTimer;
+            item.pickupDelayTimer = data.pickupDelayTimer;
             return item;
         });
     }
@@ -186,7 +215,6 @@ class ItemManager {
     getPreviewImage(itemType) {
         if (!this.previewCache) this.previewCache = {};
         if (!this.previewCache[itemType]) {
-            // Create a temporary item to get its image
             let tempItem;
             switch (itemType) {
                 case 'pistol': tempItem = new pistolItem(); break;
@@ -195,7 +223,6 @@ class ItemManager {
             if (tempItem.image && tempItem.image.src) {
                 this.previewCache[itemType] = tempItem.image;
             } else {
-                // Fallback: create a new Image object and start loading
                 const img = new Image();
                 if (tempItem.svgPath) img.src = tempItem.svgPath;
                 this.previewCache[itemType] = img;
@@ -206,32 +233,42 @@ class ItemManager {
 
     update() {
         let changed = false;
-        for (let item of this.worldItems) {
+        for (let i = 0; i < this.worldItems.length; i++) {
+            const item = this.worldItems[i];
             const wasAvailable = item.isAvailable;
             item.update();
             if (wasAvailable !== item.isAvailable) {
+                changed = true;
+            }
+            if (!item.shouldRespawn && !item.isAvailable && item.pickupDelayTimer <= 0) {
+                this.worldItems.splice(i, 1);
+                i--;
                 changed = true;
             }
         }
         if (changed) this.needsBroadcast = true;
     }
 
-    spawnItem(x, y, type) {
-        const item = new WorldItem(x, y, type);
+    spawnItem(x, y, type, delayFrames = 0, shouldRespawn = true, ammo = 3) {
+        const item = new WorldItem(x, y, type, delayFrames, shouldRespawn, ammo);
         this.worldItems.push(item);
         return item;
     }
 
     checkPickup(player) {
-        for (let item of this.worldItems) {
+        if (player.item !== null) return null;
+        for (let i = 0; i < this.worldItems.length; i++) {
+            const item = this.worldItems[i];
             if (!item.isAvailable) continue;
-            // AABB collision
             if (player.x < item.x + item.w &&
                 player.x + player.width > item.x &&
                 player.y < item.y + item.h &&
                 player.y + player.height > item.y) {
                 const usable = item.pickup();
                 if (usable) {
+                    if (!item.shouldRespawn) {
+                        this.worldItems.splice(i, 1);
+                    }
                     return usable;
                 }
             }
