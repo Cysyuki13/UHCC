@@ -180,6 +180,126 @@ function setupActiveMatchEnvironment() {
     ];
 }
 
+// ------------------------------------------------------------------
+// HOST LOBBY RESET FUNCTION (with version)
+// ------------------------------------------------------------------
+function hostResetLobby() {
+    if (!isHost || currentEngineMode !== 'LOBBY') return;
+
+    // 1. Clear all projectiles and throwables
+    projectiles = [];
+    throwables = [];
+    lastThrowableSnapshot = null;
+    lastProjectileSnapshot = null;
+
+    // 2. Clear all world items and respawn the initial pistol
+    if (itemManager) {
+        itemManager.worldItems = [];
+        itemManager.spawnItem(300, 580, 'pistol', 0, true, 3);
+    }
+
+    // 3. Reset lobby environment
+    setupLobbyEnvironment();
+
+    // 4. Reset timers and race state
+    if (lobbyTimerId) {
+        clearInterval(lobbyTimerId);
+        lobbyTimerId = null;
+    }
+    if (raceTimerId) {
+        clearInterval(raceTimerId);
+        raceTimerId = null;
+    }
+    lobbyCountdownVal = -1;
+    raceCountdownVal = -1;
+    raceStarted = false;
+    firstPlayerFinishTime = -1;
+    finishPositions = [];
+
+    // 5. Reset all players: position, velocity, score, item, ammo, ready state, dash
+    let idx = 0;
+    for (let id in players) {
+        const p = players[id];
+        p.x = 100 + idx * 45;
+        p.y = 500;
+        p.vx = 0;
+        p.vy = 0;
+        p.isGrounded = true;
+        p.jumpsLeft = 2;
+        p.dashCooldown = 0;
+        p.dashTimer = 0;
+        p.isDashing = false;
+        p.dashPushedBy = null;
+        p.score = 0;
+        p.item = null;
+        p.itemType = null;
+        p.ammo = 0;
+        p.finished = false;
+        p.finishTime = -1;
+        p.handAngle = p.facingRight ? 0 : Math.PI;
+        idx++;
+    }
+
+    // 6. Clear ready players (do NOT change host’s color)
+    readyPlayers = {};
+
+    // 7. Reset local player's item reference
+    localPlayerItem = null;
+
+    // 8. Increment reset version and broadcast with reset flag
+    resetVersion++;
+    broadcastToRoom('sync_players', { allPlayers: players, reset: true });
+    broadcastToRoom('sync_ready_players', { readyPlayers });
+    broadcastToRoom('sync_map', { platforms, hazards, gems });
+    broadcastWorldItems();
+    broadcastToRoom('sync_throwables', { throwables });
+    broadcastProjectiles();
+    broadcastToRoom('sync_lobby_countdown', { value: -1 });
+
+    playSound('door');
+    updateHudDisplays();
+}
+
+// ------------------------------------------------------------------
+// Show/hide reset button based on host and engine mode
+// ------------------------------------------------------------------
+function updateResetButtonVisibility() {
+    const resetBtn = document.getElementById('reset-lobby-btn');
+    if (!resetBtn) return;
+    if (isHost && currentEngineMode === 'LOBBY') {
+        resetBtn.classList.remove('hidden');
+    } else {
+        resetBtn.classList.add('hidden');
+    }
+}
+
+// Override existing state change functions to call visibility update
+const originalEnterLobbyState = enterLobbyState;
+enterLobbyState = function () {
+    originalEnterLobbyState();
+    updateResetButtonVisibility();
+};
+
+const originalExecuteMatchStart = executeActiveMatchStart;
+executeActiveMatchStart = function () {
+    originalExecuteMatchStart();
+    updateResetButtonVisibility();
+};
+
+const originalExecuteLobbyReturn = executeLobbyReturnSequence;
+executeLobbyReturnSequence = function () {
+    originalExecuteLobbyReturn();
+    updateResetButtonVisibility();
+};
+
+// Attach event listener to the reset button
+document.addEventListener('DOMContentLoaded', () => {
+    const resetBtn = document.getElementById('reset-lobby-btn');
+    if (resetBtn) {
+        resetBtn.addEventListener('click', hostResetLobby);
+    }
+});
+
 // ============================================================================
 //  PLAYER PROFILE & DIMENSIONS
 // ============================================================================
@@ -207,10 +327,11 @@ function createPlayerProfile(id, nameTag) {
         score: 0, jumpsLeft: 2,
         wasJumpPressed: false,
         dashCooldown: 0, dashTimer: 0, isDashing: false, wasDashPressed: false,
+        dashPushedBy: null,
         lastSeen: Date.now(),
         sizeMultiplier: 1,
         itemType: null, item: null,
-        ammo: 0                 // NEW: ammo field
+        ammo: 0
     };
 }
 
@@ -256,7 +377,7 @@ function spawnBreakParticles(x, y) {
             color: '#ff6600', alpha: 1
         });
     }
-    playSound('spike');  // breaking sound
+    playSound('spike');
 }
 
 // ============================================================================
@@ -272,7 +393,6 @@ function hostDropItem(playerId) {
 
     const ammo = player.item.ammo;
 
-    // Empty pistol → break effect, no item spawned
     if (ammo === 0) {
         spawnBreakParticles(player.x + player.width / 2, player.y + player.height / 2);
         player.item = null;
@@ -284,7 +404,6 @@ function hostDropItem(playerId) {
         return;
     }
 
-    // Non‑empty: create throwable, preserve ammo
     const handX = player.x + player.width * 0.5;
     const handY = player.y + 32;
     const dirX = player.facingRight ? 1 : -1;
@@ -341,6 +460,8 @@ let clientConnections = [];
 let hostConnection = null;
 const HEARTBEAT_TIMEOUT = 5000;
 let hostWatchdogTimer = null;
+let resetVersion = 0;          // incremented on host reset
+let clientResetVersion = 0;    // stored by clients
 
 function initHost() {
     switchPanel('panel-status');
@@ -362,6 +483,7 @@ function initHost() {
         itemManager.spawnItem(300, 580, 'pistol', 0, true, 3);
 
         enterLobbyState();
+        updateResetButtonVisibility();  // show reset button for host
         startHostWatchdog();
     });
 
@@ -404,7 +526,6 @@ function setupHostRoutingRules(conn) {
         players[newId] = createPlayerProfile(newId, claimSlot(newId));
         updateHudDisplays();
 
-        // send welcome
         const safePlayers = {};
         for (let id in players) {
             safePlayers[id] = { ...players[id] };
@@ -412,7 +533,7 @@ function setupHostRoutingRules(conn) {
         }
         conn.send({
             type: 'init_welcome',
-            payload: { assignedId: newId, allPlayers: safePlayers, mode: currentEngineMode, readyPlayers }
+            payload: { assignedId: newId, allPlayers: safePlayers, mode: currentEngineMode, readyPlayers, resetVersion }
         });
 
         broadcastToRoom('sync_map', { platforms, hazards, gems });
@@ -445,6 +566,10 @@ function setupHostRoutingRules(conn) {
                 break;
             case 'client_input_update':
                 if (players[pkg.senderId]) {
+                    // Ignore updates with an older reset version
+                    if (pkg.payload.resetVersion !== undefined && pkg.payload.resetVersion !== resetVersion) {
+                        break;
+                    }
                     const pl = players[pkg.senderId];
                     pl.x = pkg.payload.x; pl.y = pkg.payload.y;
                     pl.vx = pkg.payload.vx; pl.vy = pkg.payload.vy;
@@ -489,7 +614,6 @@ function setupHostRoutingRules(conn) {
             case 'client_shoot':
                 if (players[pkg.senderId] && pkg.payload.handAngle !== undefined) {
                     const player = players[pkg.senderId];
-                    // Update ammo from client
                     if (pkg.payload.ammo !== undefined) {
                         if (player.item) player.item.ammo = pkg.payload.ammo;
                         player.ammo = pkg.payload.ammo;
@@ -558,6 +682,7 @@ function setupClientRoutingRules(conn) {
                 localPlayerId = pkg.payload.assignedId;
                 players = pkg.payload.allPlayers;
                 currentEngineMode = pkg.payload.mode;
+                clientResetVersion = pkg.payload.resetVersion || 0;
                 document.getElementById('hud-room').innerText = roomCodeString;
                 enterLobbyState();
                 readyPlayers = pkg.payload.readyPlayers || {};
@@ -574,6 +699,11 @@ function setupClientRoutingRules(conn) {
                 else localPlayerItem = null;
                 break;
             case 'sync_players':
+                const isReset = pkg.payload.reset === true;
+                const newVersion = pkg.payload.resetVersion;
+                if (newVersion !== undefined && newVersion !== clientResetVersion) {
+                    clientResetVersion = newVersion;
+                }
                 for (let id in pkg.payload.allPlayers) {
                     const data = pkg.payload.allPlayers[id];
                     if (id !== localPlayerId) {
@@ -590,12 +720,55 @@ function setupClientRoutingRules(conn) {
                             players[id].finished = data.finished;
                             players[id].finishTime = data.finishTime;
                             players[id].itemType = data.itemType;
-                            players[id].ammo = data.ammo;    // sync ammo
+                            players[id].ammo = data.ammo;
                         }
                     }
                 }
+
                 if (pkg.payload.allPlayers[localPlayerId]) {
                     const local = pkg.payload.allPlayers[localPlayerId];
+                    if (isReset) {
+                        players[localPlayerId].x = local.x;
+                        players[localPlayerId].y = local.y;
+                        players[localPlayerId].vx = local.vx;
+                        players[localPlayerId].vy = local.vy;
+                        players[localPlayerId].isGrounded = local.isGrounded;
+                        players[localPlayerId].facingRight = local.facingRight;
+                        players[localPlayerId].isDashing = local.isDashing;
+                        players[localPlayerId].handAngle = local.handAngle;
+                        players[localPlayerId].itemType = local.itemType;
+                        players[localPlayerId].ammo = local.ammo;
+                        players[localPlayerId].finished = local.finished;
+                        players[localPlayerId].finishTime = local.finishTime;
+
+                        keys.ArrowLeft = false;
+                        keys.ArrowRight = false;
+                        keys.ArrowUp = false;
+
+                        camera.x = local.x - BASE_WIDTH / 2;
+                        camera.y = local.y - BASE_HEIGHT / 2;
+
+                        players[localPlayerId].item = null;
+                        localPlayerItem = null;
+
+                        if (hostConnection && hostConnection.open) {
+                            hostConnection.send({
+                                type: 'client_input_update',
+                                senderId: localPlayerId,
+                                payload: {
+                                    x: players[localPlayerId].x,
+                                    y: players[localPlayerId].y,
+                                    vx: players[localPlayerId].vx,
+                                    vy: players[localPlayerId].vy,
+                                    isGrounded: players[localPlayerId].isGrounded,
+                                    facingRight: players[localPlayerId].facingRight,
+                                    isDashing: players[localPlayerId].isDashing,
+                                    handAngle: players[localPlayerId].handAngle,
+                                    resetVersion: clientResetVersion
+                                }
+                            });
+                        }
+                    }
                     players[localPlayerId].score = local.score;
                     players[localPlayerId].color = local.color;
                     players[localPlayerId].itemType = local.itemType;
@@ -654,7 +827,8 @@ function broadcastToRoom(type, payload) {
             safe[id] = { ...payload.allPlayers[id] };
             delete safe[id].item;
         }
-        msgPayload = { allPlayers: safe };
+        msgPayload = { allPlayers: safe, resetVersion: resetVersion };
+        if (payload.reset === true) msgPayload.reset = true;
     }
     const msg = { type, payload: msgPayload };
     clientConnections.forEach(conn => { if (conn.open) conn.send(msg); });
@@ -862,6 +1036,7 @@ function executeLobbyReturnSequence() {
         players[id].vx = players[id].vy = 0;
         idx++;
     }
+    updateResetButtonVisibility();
 }
 
 // ============================================================================
@@ -885,30 +1060,38 @@ function resolvePlayerCollisions() {
             let p1 = players[ids[i]], p2 = players[ids[j]];
             if (p1.x < p2.x + p2.width && p1.x + p1.width > p2.x &&
                 p1.y < p2.y + p2.height && p1.y + p1.height > p2.y) {
+
                 const overlapLeft = p1.x + p1.width - p2.x;
                 const overlapRight = p2.x + p2.width - p1.x;
                 const overlapTop = p1.y + p1.height - p2.y;
                 const overlapBottom = p2.y + p2.height - p1.y;
                 const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
-                const DASH_PUSH = 3;  // reduced from 10 to prevent extreme sliding
-                const MAX_KNOCKBACK_VEL = 6; // global cap after knockback
 
-                if (p1.isDashing && !p2.isDashing) {
+                const DASH_PUSH = 6;   // Slightly increased for better feel, but one-time
+                const MAX_VICTIM_SPEED = 12;
+
+                // ONE-TIME DASH PUSH (only if not already pushed by this dasher)
+                if (p1.isDashing && !p2.isDashing && p2.dashPushedBy !== p1.id) {
                     const dir = (p1.x + p1.width / 2) > (p2.x + p2.width / 2) ? 1 : -1;
                     p2.vx += dir * DASH_PUSH;
-                    // clamp to prevent chain-sliding
-                    p2.vx = Math.min(MAX_KNOCKBACK_VEL, Math.max(-MAX_KNOCKBACK_VEL, p2.vx));
-                } else if (p2.isDashing && !p1.isDashing) {
+                    p2.vx = Math.min(MAX_VICTIM_SPEED, Math.max(-MAX_VICTIM_SPEED, p2.vx));
+                    p2.dashPushedBy = p1.id;   // Mark as pushed by p1
+                } else if (p2.isDashing && !p1.isDashing && p1.dashPushedBy !== p2.id) {
                     const dir = (p2.x + p2.width / 2) > (p1.x + p1.width / 2) ? 1 : -1;
                     p1.vx += dir * DASH_PUSH;
-                    p1.vx = Math.min(MAX_KNOCKBACK_VEL, Math.max(-MAX_KNOCKBACK_VEL, p1.vx));
-                } else if (p1.isDashing && p2.isDashing) {
+                    p1.vx = Math.min(MAX_VICTIM_SPEED, Math.max(-MAX_VICTIM_SPEED, p1.vx));
+                    p1.dashPushedBy = p2.id;
+                } else if (p1.isDashing && p2.isDashing && p1.dashPushedBy !== p2.id && p2.dashPushedBy !== p1.id) {
                     const dir = (p1.x + p1.width / 2) > (p2.x + p2.width / 2) ? 1 : -1;
                     p1.vx -= dir * DASH_PUSH * 0.7;
                     p2.vx += dir * DASH_PUSH * 0.7;
-                    p1.vx = Math.min(MAX_KNOCKBACK_VEL, Math.max(-MAX_KNOCKBACK_VEL, p1.vx));
-                    p2.vx = Math.min(MAX_KNOCKBACK_VEL, Math.max(-MAX_KNOCKBACK_VEL, p2.vx));
+                    p1.vx = Math.min(MAX_VICTIM_SPEED, Math.max(-MAX_VICTIM_SPEED, p1.vx));
+                    p2.vx = Math.min(MAX_VICTIM_SPEED, Math.max(-MAX_VICTIM_SPEED, p2.vx));
+                    p1.dashPushedBy = p2.id;
+                    p2.dashPushedBy = p1.id;
                 }
+
+                // Positional separation (unchanged)
                 if (minOverlap === overlapLeft || minOverlap === overlapRight) {
                     const sep = Math.min(minOverlap, 5);
                     if (minOverlap === overlapLeft) { p1.x -= sep; p2.x += sep; }
@@ -919,6 +1102,7 @@ function resolvePlayerCollisions() {
                     else { p1.y += sep; p2.y -= sep; }
                     if (p1.vy > 0 && p2.vy < 0) { p1.vy = 0; p2.vy = 0; }
                 }
+
                 const MAX_PUSH = 18;
                 p1.vx = Math.min(MAX_PUSH, Math.max(-MAX_PUSH, p1.vx));
                 p2.vx = Math.min(MAX_PUSH, Math.max(-MAX_PUSH, p2.vx));
@@ -936,19 +1120,17 @@ function updateCharacterPhysics(player, dt) {
     let dashJustPressed = shift && !player.wasDashPressed;
     player.wasDashPressed = shift;
 
-    // Start dash if conditions are met
     if (dashJustPressed && player.dashCooldown <= 0 && !player.isDashing) {
         player.isDashing = true;
         player.dashTimer = 10;
         player.dashCooldown = 90;
     }
 
-    // ----- DASH MOVEMENT (stepped to avoid tunneling through players) -----
     let dashMovementApplied = false;
     if (player.isDashing) {
         player.vx = player.facingRight ? DASH_SPEED : -DASH_SPEED;
         const totalMove = player.vx * dt;
-        const stepSize = 3; // small step – guarantees we don't skip over a player
+        const stepSize = 3;
         let moved = 0;
 
         while (Math.abs(moved) < Math.abs(totalMove)) {
@@ -957,7 +1139,6 @@ function updateCharacterPhysics(player, dt) {
             let stepX = (totalMove > 0 ? step : -step);
             let newX = player.x + stepX;
 
-            // Create a temporary player for collision checks
             let tempPlayer = {
                 x: newX,
                 y: player.y,
@@ -967,7 +1148,6 @@ function updateCharacterPhysics(player, dt) {
 
             let collision = false;
 
-            // 1) Check collision with other players
             for (let id in players) {
                 if (id === player.id) continue;
                 let other = players[id];
@@ -977,7 +1157,6 @@ function updateCharacterPhysics(player, dt) {
                 }
             }
 
-            // 2) Also check platforms – prevents dashing through walls
             if (!collision) {
                 for (let plat of platforms) {
                     if (checkCollision(tempPlayer, plat)) {
@@ -988,7 +1167,6 @@ function updateCharacterPhysics(player, dt) {
             }
 
             if (collision) {
-                // Stop dash immediately, do NOT apply the overlapping step
                 player.isDashing = false;
                 player.dashTimer = 0;
                 player.vx = 0;
@@ -997,19 +1175,18 @@ function updateCharacterPhysics(player, dt) {
             } else {
                 player.x = newX;
                 moved += stepX;
-                dashMovementApplied = true; // movement has been applied step‑by‑step
+                dashMovementApplied = true;
             }
         }
 
-        // Update dash timer
         player.dashTimer -= dt;
         if (player.dashTimer <= 0 && player.isDashing) {
             player.isDashing = false;
             player.vx *= 0.4;
+            player.dashPushedBy = null;
         }
     }
 
-    // ----- NORMAL MOVEMENT (only if not dashing OR dash didn't move) -----
     if (!player.isDashing && !dashMovementApplied) {
         if (left) {
             player.vx = -MOVE_SPEED;
@@ -1024,7 +1201,6 @@ function updateCharacterPhysics(player, dt) {
         player.x += player.vx * dt;
     }
 
-    // ----- GRAVITY & JUMP -----
     let dynGravity = GRAVITY;
     if (jump && player.vy < 0) dynGravity = GRAVITY * 0.4;
     player.vy += dynGravity * dt;
@@ -1047,10 +1223,7 @@ function updateCharacterPhysics(player, dt) {
         }
     }
 
-    // ----- PLATFORM COLLISION (horizontal) -----
     player.isGrounded = false;
-    // Skip horizontal platform collision if we already handled dash movement and ended early?
-    // We still run it because the player might have been moved by dash stepping.
     platforms.forEach(plat => {
         if (checkCollision(player, plat)) {
             if (player.vx > 0) player.x = plat.x - player.width;
@@ -1060,7 +1233,6 @@ function updateCharacterPhysics(player, dt) {
         }
     });
 
-    // ----- VERTICAL MOVEMENT & PLATFORM COLLISION -----
     player.y += player.vy * dt;
     let landed = false;
     platforms.forEach(plat => {
@@ -1077,11 +1249,13 @@ function updateCharacterPhysics(player, dt) {
         }
     });
 
-    // ----- BOUNDARIES -----
-    if (player.x < 20) player.x = 20;
-    if (player.x + player.width > 1260) player.x = 1260 - player.width;
+    if (player.x < 20) {
+        player.x = 20;
+    }
+    if (player.x + player.width > 1260) {
+        player.x = 1260 - player.width;
+    }
 
-    // ----- HAZARDS -----
     hazards.forEach(h => {
         if (checkCollision(player, h)) {
             player.isDashing = false;
@@ -1089,7 +1263,6 @@ function updateCharacterPhysics(player, dt) {
         }
     });
 
-    // ----- GEMS -----
     gems.forEach(g => {
         if (!g.collected && checkCircleCollision(player, g)) {
             if (isHost) processGemCapture(g.id, player.id);
@@ -1097,7 +1270,6 @@ function updateCharacterPhysics(player, dt) {
         }
     });
 
-    // ----- PLAYER ON TOP OF OTHER PLAYER (head jump) -----
     for (let otherId in players) {
         if (otherId === player.id) continue;
         let target = players[otherId];
@@ -1110,7 +1282,6 @@ function updateCharacterPhysics(player, dt) {
         }
     }
 
-    // ----- LANDING PARTICLES -----
     if (!player.isGrounded && landed) {
         spawnDustParticles(player.x + player.width / 2, player.y + player.height);
         playSound('spike');
@@ -1448,7 +1619,6 @@ function drawCharacterModel(p) {
         const handX = handPivotX + Math.cos(handAngle) * 24;
         const handY = handPivotY + Math.sin(handAngle) * 24;
         p.item.draw(ctx, handX, handY, handAngle, p.facingRight);
-        // Only show ammo for the local player
         if (p.id === localPlayerId && p.itemType === 'pistol' && p.item.ammo !== undefined) {
             ctx.font = 'bold 14px "Orbitron"';
             ctx.fillStyle = '#fff';
@@ -1574,7 +1744,8 @@ function enginePipelineTick(timestamp) {
                     payload: {
                         x: localPlayer.x, y: localPlayer.y, vx: localPlayer.vx, vy: localPlayer.vy,
                         isGrounded: localPlayer.isGrounded, facingRight: localPlayer.facingRight,
-                        isDashing: localPlayer.isDashing, handAngle: calculateHandAngle(localPlayer)
+                        isDashing: localPlayer.isDashing, handAngle: calculateHandAngle(localPlayer),
+                        resetVersion: clientResetVersion   // <-- include version
                     }
                 });
             }
@@ -1603,10 +1774,8 @@ function enginePipelineTick(timestamp) {
             if (keys.Drop && !wasDropPressed) {
                 if (localPlayer.item) {
                     if (!isHost && hostConnection?.open) {
-                        // Client: if empty pistol, show break effect immediately
                         if (localPlayer.item.ammo !== undefined && localPlayer.item.ammo === 0) {
                             spawnBreakParticles(localPlayer.x + localPlayer.width / 2, localPlayer.y + localPlayer.height / 2);
-                            // Optimistically clear local item
                             localPlayer.item = null;
                             localPlayer.itemType = null;
                             localPlayer.ammo = 0;
@@ -1817,7 +1986,6 @@ canvas.addEventListener('mousedown', (e) => {
     if (!localPlayerItem) return;
     if (!localPlayerItem.canUse()) return;
 
-    // Check ammo (pistol only)
     if (localPlayerItem.ammo !== undefined && localPlayerItem.ammo <= 0) return;
 
     if (isHost) {
@@ -1828,7 +1996,6 @@ canvas.addEventListener('mousedown', (e) => {
             broadcastToRoom('sync_players', { allPlayers: players });
         }
     } else {
-        // Client: decrement locally and send updated ammo
         if (localPlayerItem.ammo !== undefined) {
             localPlayerItem.ammo--;
             players[localPlayerId].ammo = localPlayerItem.ammo;
