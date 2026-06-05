@@ -4,11 +4,12 @@
 // Base Item Class (the "usable" item held by a player)
 // ------------------------------------------------------------------
 class UsableItem {
-    constructor(name, svgPath, cooldownFrames = 30) {
+    // Changed: cooldownSeconds instead of cooldownFrames
+    constructor(name, svgPath, cooldownSeconds = 0.75) {
         this.name = name;
         this.svgPath = svgPath;
-        this.cooldown = 0;
-        this.cooldownMax = cooldownFrames;
+        this.cooldown = 0;           // seconds remaining
+        this.cooldownMax = cooldownSeconds;
         this.image = null;
         this.loaded = false;
         this.loadImage();
@@ -47,11 +48,17 @@ class UsableItem {
         ctx.restore();
     }
 
-    update() {
-        if (this.cooldown > 0) this.cooldown--;
+    // Changed: now accepts dt (delta time in seconds)
+    update(dt) {
+        if (this.cooldown > 0) {
+            this.cooldown -= dt;
+            if (this.cooldown < 0) this.cooldown = 0;
+        }
     }
 
-    canUse() { return this.cooldown === 0; }
+    canUse() {
+        return this.cooldown <= 0;
+    }
 
     onUse(player, gameState) {
         if (!this.canUse()) return false;
@@ -65,10 +72,11 @@ class UsableItem {
 // ------------------------------------------------------------------
 class pistolItem extends UsableItem {
     constructor(ammo = 3) {
-        super('pistol', 'assets/items/pistol.svg', 45); // increased cooldown
-        this.projectileSpeed = 12;
+        // 0.75 second cooldown (was 45 frames at 60fps ≈ 0.75s )
+        super('pistol', 'assets/items/pistol.svg', 0.75);
+        this.projectileSpeed = window.PISTOL_PROJECTILE_SPEED || 36;
         this.projectileRadius = 6;
-        this.knockbackForce = 15; // increased knockback
+        this.knockbackForce = 15;
         this.ammo = ammo;
         this.maxAmmo = 3;
     }
@@ -116,7 +124,7 @@ class WorldItem {
         this.pickupDelayTimer = initialDelay;
         this.isAvailable = (initialDelay === 0);
         this.shouldRespawn = shouldRespawn;
-        this.ammo = ammo;           // store ammo count
+        this.ammo = ammo;
     }
 
     pickup() {
@@ -281,4 +289,4 @@ class ItemManager {
 window.UsableItem = UsableItem;
 window.pistolItem = pistolItem;
 window.WorldItem = WorldItem;
-window.ItemManager = ItemManager;
+window.ItemManager = ItemManager;   

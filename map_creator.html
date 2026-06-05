@@ -1,0 +1,1327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>UHCC – Map Creator (Wheel Zoom, Spawn Points, Door Colors)</title>
+    <style>
+        * {
+            user-select: none;
+            box-sizing: border-box;
+        }
+        body {
+            background: #0e071a;
+            font-family: 'Segoe UI', 'Orbitron', monospace;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            color: #ddd;
+        }
+        .editor-panel {
+            background: #160c2b;
+            border: 1px solid #2d1b54;
+            border-radius: 16px;
+            padding: 16px;
+            width: 300px;
+            box-shadow: 0 0 15px rgba(0,242,254,0.2);
+        }
+        .canvas-area {
+            flex: 1;
+            min-width: 640px;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            position: relative;
+        }
+        canvas {
+            background: #0c0516;
+            border: 2px solid #2d1b54;
+            border-radius: 12px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            cursor: crosshair;
+            width: 100%;
+            height: auto;
+            aspect-ratio: 1280 / 720;
+        }
+        .minimap {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.7);
+            border: 1px solid #00f2fe;
+            border-radius: 8px;
+            padding: 4px;
+            width: 150px;
+            height: 84px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .minimap canvas {
+            width: 100%;
+            height: 100%;
+            border: none;
+            aspect-ratio: auto;
+        }
+        .movement-panel {
+            background: #160c2b;
+            border-radius: 16px;
+            padding: 12px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #2d1b54;
+        }
+        .arrow-group {
+            display: flex;
+            gap: 8px;
+            background: #0c0516;
+            padding: 6px 12px;
+            border-radius: 40px;
+        }
+        .arrow-btn {
+            width: 44px;
+            height: 44px;
+            font-size: 24px;
+            background: #2a1a3a;
+        }
+        .selected-info-compact {
+            background: #0c0516;
+            border-radius: 40px;
+            padding: 6px 15px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .selected-info-compact label {
+            font-size: 11px;
+            color: #aaa;
+        }
+        .selected-info-compact input {
+            background: #1a0f2c;
+            border: 1px solid #2d1b54;
+            color: #fff;
+            width: 55px;
+            text-align: center;
+            border-radius: 20px;
+            padding: 4px;
+            margin-left: 4px;
+        }
+        .zoom-control, .pan-control {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            background: #0c0516;
+            padding: 4px 12px;
+            border-radius: 40px;
+        }
+        button, .mode-btn {
+            background: #20113c;
+            border: 1px solid #2d1b54;
+            color: #ccc;
+            padding: 8px 12px;
+            margin: 4px;
+            border-radius: 20px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: 0.1s;
+            font-family: inherit;
+        }
+        button.active {
+            background: #00f2fe;
+            color: #000;
+            border-color: #00f2fe;
+            box-shadow: 0 0 8px #00f2fe;
+        }
+        button.danger {
+            background: #3a0c1c;
+            border-color: #ff007f;
+            color: #ff99cc;
+        }
+        .section {
+            margin-top: 20px;
+            border-top: 1px solid #2d1b54;
+            padding-top: 12px;
+        }
+        .object-list {
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 12px;
+            background: #0c0516;
+            border-radius: 12px;
+            padding: 8px;
+        }
+        .object-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin: 4px 0;
+            background: #1a0f2c;
+            padding: 4px 8px;
+            border-radius: 12px;
+        }
+        .object-item button {
+            padding: 2px 8px;
+            font-size: 10px;
+            background: #ff003c;
+            border: none;
+        }
+        .export-box, .import-textarea {
+            background: #0c0516;
+            border-radius: 12px;
+            padding: 8px;
+            font-family: monospace;
+            font-size: 11px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 180px;
+            overflow: auto;
+            width: 100%;
+            border: 1px solid #2d1b54;
+            color: #0f0;
+        }
+        .import-textarea {
+            resize: vertical;
+            font-size: 10px;
+            background: #0a0512;
+        }
+        .tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .tab-btn {
+            flex: 1;
+            background: #1a0f2c;
+        }
+        .tab-btn.active {
+            background: #ff007f;
+            color: white;
+            border-color: #ff007f;
+        }
+        .history-buttons {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-bottom: 10px;
+        }
+        .flex-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .coord-status {
+            font-size: 12px;
+            margin-top: 8px;
+            color: #aaa;
+        }
+        .view-coords {
+            font-family: monospace;
+            background: #0c0516;
+            padding: 2px 8px;
+            border-radius: 20px;
+            font-size: 11px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="editor-panel">
+    <div class="tabs">
+        <button id="tabLobbyBtn" class="tab-btn active">🏠 LOBBY</button>
+        <button id="tabMatchBtn" class="tab-btn">⚔️ MATCH</button>
+    </div>
+
+    <div class="section">
+        <strong>🖌️ Tools</strong><br>
+        <button id="toolSelect" class="mode-btn active">🖱️ Select</button>
+        <button id="toolPlatform" class="mode-btn">📦 Platform</button>
+        <button id="toolHazard" class="mode-btn">⚠️ Hazard</button>
+        <button id="toolGem" class="mode-btn">💎 Gem</button>
+        <button id="toolSpawn" class="mode-btn">⭐ Spawn Point</button>
+        <button id="toolSkinDoor" class="mode-btn">🎨 Skin Door</button>
+        <button id="toolLobbyDoor" class="mode-btn">🚪 Lobby Door</button>
+        <button id="toolFinish" class="mode-btn">🏁 Finish Line</button>
+        <div class="coord-status" id="coordStatus">Select mode: click to select, drag or arrow keys to move</div>
+    </div>
+
+    <div class="section">
+        <strong>🧹 Actions</strong><br>
+        <div class="history-buttons">
+            <button id="undoBtn" title="Undo (Ctrl+Z)">↩️ Undo</button>
+            <button id="redoBtn" title="Redo (Ctrl+Y / Ctrl+Shift+Z)">↪️ Redo</button>
+        </div>
+        <button id="clearAllBtn" class="danger">🗑️ Clear current map</button>
+        <button id="snapToggle">🔘 Snap to grid (OFF)</button>
+        <label><input type="checkbox" id="showGrid" checked> Show grid</label>
+    </div>
+
+    <div class="section">
+        <strong>📋 Objects</strong>
+        <div id="objectList" class="object-list">Select a map first</div>
+    </div>
+
+    <div class="section">
+        <strong>📥 Import Map</strong>
+        <div class="flex-row">
+            <button id="importFileBtn">📂 Import from JSON file</button>
+            <input type="file" id="importFileInput" accept=".json" style="display:none;">
+        </div>
+        <textarea id="importJsonText" class="import-textarea" rows="4" placeholder="Paste JSON here..."></textarea>
+        <button id="importTextBtn" style="width:100%; margin-top:5px;">📋 Import from text</button>
+    </div>
+
+    <div class="section">
+        <strong>📤 Export current map only</strong><br>
+        <button id="copyCurrentMapBtn">📋 Copy current map (JSON)</button>
+        <button id="saveCurrentMapBtn">💾 Save current map as .json</button>
+        <div id="currentMapPreview" class="export-box"></div>
+    </div>
+
+    <div class="section">
+        <strong>📦 Export full maps.js</strong>
+        <button id="exportClipboard">📋 Copy full maps.js</button>
+        <button id="exportFile">💾 Save as maps.js</button>
+        <div id="exportPreview" class="export-box"></div>
+    </div>
+</div>
+
+<div class="canvas-area">
+    <canvas id="mapCanvas" width="1280" height="720"></canvas>
+    <div class="minimap" id="minimapContainer">
+        <canvas id="minimapCanvas" width="150" height="84"></canvas>
+    </div>
+
+    <div class="movement-panel">
+        <div class="arrow-group">
+            <button class="arrow-btn" id="moveUp">▲</button>
+            <button class="arrow-btn" id="moveLeft">◀</button>
+            <button class="arrow-btn" id="moveDown">▼</button>
+            <button class="arrow-btn" id="moveRight">▶</button>
+        </div>
+        <div class="selected-info-compact" id="selectedInfoCompact" style="display:none;">
+            <span>📍 Selected</span>
+            <label>X <input type="number" id="selX" step="1" style="width:60px"></label>
+            <label>Y <input type="number" id="selY" step="1" style="width:60px"></label>
+            <label>W <input type="number" id="selW" step="1" style="width:55px"></label>
+            <label>H <input type="number" id="selH" step="1" style="width:55px"></label>
+            <button id="applySelBtn" style="padding:4px 12px;">Apply</button>
+        </div>
+        <div class="zoom-control">
+            <span>🔍 Zoom</span>
+            <button id="zoomOutBtn" title="Zoom Out">−</button>
+            <span id="zoomValue" style="min-width:45px; text-align:center;">100%</span>
+            <button id="zoomInBtn" title="Zoom In">+</button>
+            <button id="zoomResetBtn" title="Reset Zoom">⟳</button>
+        </div>
+        <div class="pan-control">
+            <span>🖐️ Pan</span>
+            <button id="panResetBtn" title="Reset View">Reset view</button>
+            <span class="view-coords" id="viewCoords">0,0</span>
+        </div>
+        <div>
+            <label><input type="checkbox" id="snapMove"> Snap move (20px)</label>
+        </div>
+    </div>
+    <p style="font-size:12px; margin-top:4px;">
+        🖱️ Select tool: click to select, drag or use arrow keys / buttons to move.<br>
+        Other tools: click to add new object. Right‑click to delete. <strong>Ctrl+Z / Ctrl+Y</strong> undo/redo.<br>
+        📥 Import: paste JSON (from export) or load file to restore a map.<br>
+        🖐️ Pan: <strong>Space + drag</strong> or <strong>middle‑click + drag</strong> or <strong>Shift + left drag</strong>.<br>
+        🎯 Axis lock while moving: hold <strong>Shift</strong> while dragging or using arrow keys.<br>
+        ⭐ Spawn points: up to 6, will be used as player starting positions.
+    </p>
+</div>
+
+<script>
+    // ---------- VIRTUAL MAP SIZE (3x original) ----------
+    const VIRTUAL_WIDTH = 3840;   // 3 * 1280
+    const VIRTUAL_HEIGHT = 2160;  // 3 * 720
+    const VIEW_WIDTH = 1280;
+    const VIEW_HEIGHT = 720;
+    
+    // Viewport position (top-left of visible area in virtual coordinates)
+    let viewX = 0, viewY = 0;
+    let zoom = 1.0;
+    const MIN_ZOOM = 0.3;
+    const MAX_ZOOM = 2.5;
+    
+    // Panning state (shared between middle-click, Shift+left, and Space+left)
+    let isPanning = false;
+    let panStartX = 0, panStartY = 0;
+    let panStartViewX = 0, panStartViewY = 0;
+    
+    // Axis lock state for dragging
+    let dragAxisLock = false;
+    let dragLockAxis = null;
+    let dragStartPos = null;
+    
+    // Space key state for panning
+    let spacePressed = false;
+    
+    // ---------- DATA MODELS ----------
+    let currentMapType = "lobby";
+    
+    // Lobby data (with default platforms and spawn points)
+    let lobbyData = {
+        platforms: [
+            { x: 0, y: 640, w: 1280, h: 40 },
+            { x: 0, y: 0, w: 20, h: 680 },
+            { x: 1260, y: 0, w: 20, h: 680 },
+            { x: 200, y: 500, w: 250, h: 20 },
+            { x: 550, y: 400, w: 300, h: 20 },
+            { x: 900, y: 280, w: 250, h: 20 }
+        ],
+        hazards: [],
+        gems: [],
+        spawnPoints: [
+            { id: 1, x: 100, y: 500 },
+            { id: 2, x: 200, y: 500 },
+            { id: 3, x: 300, y: 500 },
+            { id: 4, x: 400, y: 500 },
+            { id: 5, x: 500, y: 500 },
+            { id: 6, x: 600, y: 500 }
+        ],
+        skinDoor: { x: 220, y: 390, w: 70, h: 110, color: '#ff007f' },
+        lobbyDoor: { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' },
+        finishLine: null
+    };
+    
+    // Match data – completely empty
+    let matchData = {
+        platforms: [],
+        hazards: [],
+        gems: [],
+        spawnPoints: [],
+        finishLine: null,
+        skinDoor: null,
+        lobbyDoor: null
+    };
+    
+    let activeTool = "select";
+    let snapEnabled = false;
+    let showGrid = true;
+    let snapMove = false;
+    let selectedObj = null;
+    
+    // ---------- UNDO / REDO ----------
+    let historyLobby = { undo: [], redo: [] };
+    let historyMatch = { undo: [], redo: [] };
+    const MAX_HISTORY = 50;
+    
+    function getCurrentHistory() {
+        return currentMapType === "lobby" ? historyLobby : historyMatch;
+    }
+    
+    function getCurrentData() {
+        return currentMapType === "lobby" ? lobbyData : matchData;
+    }
+    
+    function saveState() {
+        const hist = getCurrentHistory();
+        const currentData = getCurrentData();
+        const clone = JSON.parse(JSON.stringify(currentData));
+        hist.undo.push(clone);
+        if (hist.undo.length > MAX_HISTORY) hist.undo.shift();
+        hist.redo = [];
+    }
+    
+    function undo() {
+        const hist = getCurrentHistory();
+        if (hist.undo.length === 0) return;
+        const current = getCurrentData();
+        hist.redo.push(JSON.parse(JSON.stringify(current)));
+        if (hist.redo.length > MAX_HISTORY) hist.redo.shift();
+        const previous = hist.undo.pop();
+        if (currentMapType === "lobby") lobbyData = previous;
+        else matchData = previous;
+        clearSelection();
+        render();
+    }
+    
+    function redo() {
+        const hist = getCurrentHistory();
+        if (hist.redo.length === 0) return;
+        const current = getCurrentData();
+        hist.undo.push(JSON.parse(JSON.stringify(current)));
+        if (hist.undo.length > MAX_HISTORY) hist.undo.shift();
+        const next = hist.redo.pop();
+        if (currentMapType === "lobby") lobbyData = next;
+        else matchData = next;
+        clearSelection();
+        render();
+    }
+    
+    function clearSelection() {
+        selectedObj = null;
+        document.getElementById('selectedInfoCompact').style.display = 'none';
+        render();
+    }
+    
+    function updateSelectedInputs() {
+        if (!selectedObj) return;
+        const infoDiv = document.getElementById('selectedInfoCompact');
+        infoDiv.style.display = 'flex';
+        document.getElementById('selX').value = selectedObj.ref.x;
+        document.getElementById('selY').value = selectedObj.ref.y;
+        if (selectedObj.ref.w !== undefined) {
+            document.getElementById('selW').value = selectedObj.ref.w;
+            document.getElementById('selH').value = selectedObj.ref.h;
+        } else {
+            document.getElementById('selW').value = 0;
+            document.getElementById('selH').value = 0;
+        }
+    }
+    
+    function applyManualMove() {
+        if (!selectedObj) return;
+        let newX = parseInt(document.getElementById('selX').value);
+        let newY = parseInt(document.getElementById('selY').value);
+        let newW = parseInt(document.getElementById('selW').value);
+        let newH = parseInt(document.getElementById('selH').value);
+        if (isNaN(newX)) newX = selectedObj.ref.x;
+        if (isNaN(newY)) newY = selectedObj.ref.y;
+        if (selectedObj.ref.w !== undefined && !isNaN(newW)) selectedObj.ref.w = Math.max(5, newW);
+        if (selectedObj.ref.h !== undefined && !isNaN(newH)) selectedObj.ref.h = Math.max(5, newH);
+        selectedObj.ref.x = newX;
+        selectedObj.ref.y = newY;
+        saveState();
+        render();
+        updateSelectedInputs();
+    }
+    
+    function moveSelected(dx, dy, constrainToArrowKey = false, axis = null) {
+        if (!selectedObj) return;
+        let stepX = dx, stepY = dy;
+        if (snapMove) {
+            stepX = Math.round(stepX / 20) * 20;
+            stepY = Math.round(stepY / 20) * 20;
+        }
+        if (constrainToArrowKey) {
+            if (axis === 'x') stepY = 0;
+            if (axis === 'y') stepX = 0;
+        }
+        selectedObj.ref.x += stepX;
+        selectedObj.ref.y += stepY;
+        // Clamp to virtual map bounds (for objects with w/h)
+        if (selectedObj.ref.w !== undefined) {
+            selectedObj.ref.x = Math.max(0, Math.min(VIRTUAL_WIDTH - selectedObj.ref.w, selectedObj.ref.x));
+            selectedObj.ref.y = Math.max(0, Math.min(VIRTUAL_HEIGHT - selectedObj.ref.h, selectedObj.ref.y));
+        } else {
+            // spawn points (circles) – treat as 20px size for clamping
+            selectedObj.ref.x = Math.max(0, Math.min(VIRTUAL_WIDTH - 20, selectedObj.ref.x));
+            selectedObj.ref.y = Math.max(0, Math.min(VIRTUAL_HEIGHT - 20, selectedObj.ref.y));
+        }
+        saveState();
+        render();
+        updateSelectedInputs();
+    }
+    
+    function findObjectUnderMouse(mx, my) {
+        const data = getCurrentData();
+        // check spawn points first (circles radius 12)
+        for (let i = 0; i < data.spawnPoints.length; i++) {
+            const s = data.spawnPoints[i];
+            const dx = mx - s.x, dy = my - s.y;
+            if (Math.hypot(dx,dy) < 12) return { type: "spawn", index: i, ref: s };
+        }
+        if (currentMapType === "match" && data.finishLine && mx >= data.finishLine.x && mx <= data.finishLine.x+data.finishLine.w && my >= data.finishLine.y && my <= data.finishLine.y+data.finishLine.h) {
+            return { type: "finish", index: -1, ref: data.finishLine };
+        }
+        if (currentMapType === "lobby") {
+            if (data.skinDoor && mx >= data.skinDoor.x && mx <= data.skinDoor.x+data.skinDoor.w && my >= data.skinDoor.y && my <= data.skinDoor.y+data.skinDoor.h)
+                return { type: "skinDoor", index: -1, ref: data.skinDoor };
+            if (data.lobbyDoor && mx >= data.lobbyDoor.x && mx <= data.lobbyDoor.x+data.lobbyDoor.w && my >= data.lobbyDoor.y && my <= data.lobbyDoor.y+data.lobbyDoor.h)
+                return { type: "lobbyDoor", index: -1, ref: data.lobbyDoor };
+        }
+        for (let i = 0; i < data.gems.length; i++) {
+            const g = data.gems[i];
+            const dx = mx - g.x, dy = my - g.y;
+            if (Math.hypot(dx,dy) < 12) return { type: "gem", index: i, ref: g };
+        }
+        for (let i = 0; i < data.hazards.length; i++) {
+            const h = data.hazards[i];
+            if (mx >= h.x && mx <= h.x+h.w && my >= h.y && my <= h.y+h.h) return { type: "hazard", index: i, ref: h };
+        }
+        for (let i = 0; i < data.platforms.length; i++) {
+            const p = data.platforms[i];
+            if (mx >= p.x && mx <= p.x+p.w && my >= p.y && my <= p.y+p.h) return { type: "platform", index: i, ref: p };
+        }
+        return null;
+    }
+    
+    function deleteObjectByRef(obj) {
+        if (!obj) return;
+        const data = getCurrentData();
+        if (obj.type === "platform") data.platforms.splice(obj.index,1);
+        if (obj.type === "hazard") data.hazards.splice(obj.index,1);
+        if (obj.type === "gem") data.gems.splice(obj.index,1);
+        if (obj.type === "spawn") data.spawnPoints.splice(obj.index,1);
+        if (obj.type === "finish" && currentMapType === "match") data.finishLine = null;
+        if (obj.type === "skinDoor" && currentMapType === "lobby") data.skinDoor = null;
+        if (obj.type === "lobbyDoor" && currentMapType === "lobby") data.lobbyDoor = null;
+        if (selectedObj && selectedObj.type === obj.type && selectedObj.index === obj.index) clearSelection();
+        saveState();
+        render();
+    }
+    
+    function addObjectAt(virtualX, virtualY) {
+        let x = virtualX, y = virtualY;
+        if (snapEnabled) {
+            x = Math.round(x / 20) * 20;
+            y = Math.round(y / 20) * 20;
+        }
+        const data = getCurrentData();
+        switch(activeTool) {
+            case "platform":
+                data.platforms.push({ x, y, w: 100, h: 20 });
+                break;
+            case "hazard":
+                data.hazards.push({ x, y, w: 80, h: 15 });
+                break;
+            case "gem":
+                data.gems.push({ id: Date.now() + Math.random(), x, y, collected: false });
+                break;
+            case "spawn":
+                // limit to 6 spawn points
+                if (data.spawnPoints.length >= 6) {
+                    alert("Maximum 6 spawn points allowed.");
+                    return;
+                }
+                data.spawnPoints.push({ id: data.spawnPoints.length + 1, x, y });
+                break;
+            case "skinDoor":
+                if (currentMapType === "lobby") data.skinDoor = { x, y, w: 70, h: 110, color: '#ff007f' };
+                break;
+            case "lobbyDoor":
+                if (currentMapType === "lobby") data.lobbyDoor = { x, y, w: 70, h: 110, color: '#ffcc00' };
+                break;
+            case "finish":
+                if (currentMapType === "match") data.finishLine = { x, y, w: 70, h: 80, color: '#00ff66' };
+                break;
+        }
+        saveState();
+        render();
+    }
+    
+    // ---------- IMPORT MAP (updated to handle spawnPoints) ----------
+    function validateAndImport(jsonObj) {
+        if (typeof jsonObj !== 'object' || jsonObj === null) throw new Error("Invalid JSON object");
+        const isLobby = currentMapType === "lobby";
+        if (!Array.isArray(jsonObj.platforms)) throw new Error("Missing 'platforms' array");
+        if (!Array.isArray(jsonObj.hazards)) throw new Error("Missing 'hazards' array");
+        if (!Array.isArray(jsonObj.gems)) throw new Error("Missing 'gems' array");
+        // spawnPoints optional (default empty)
+        const spawnPoints = Array.isArray(jsonObj.spawnPoints) ? jsonObj.spawnPoints : [];
+        if (isLobby) {
+            if (!jsonObj.doors || typeof jsonObj.doors !== 'object') throw new Error("Missing 'doors' object for lobby map");
+        } else {
+            if (!jsonObj.finishLine && jsonObj.finishLine !== null) throw new Error("Missing 'finishLine' for match map");
+        }
+        const newData = {
+            platforms: jsonObj.platforms.map(p => ({ x: p.x, y: p.y, w: p.w, h: p.h })),
+            hazards: jsonObj.hazards.map(h => ({ x: h.x, y: h.y, w: h.w, h: h.h })),
+            gems: jsonObj.gems.map(g => ({ id: g.id || Date.now()+Math.random(), x: g.x, y: g.y, collected: false })),
+            spawnPoints: spawnPoints.map(s => ({ id: s.id || Date.now()+Math.random(), x: s.x, y: s.y }))
+        };
+        if (isLobby) {
+            newData.skinDoor = jsonObj.doors.skinDoor ? { ...jsonObj.doors.skinDoor, color: '#ff007f' } : null;
+            newData.lobbyDoor = jsonObj.doors.lobbyDoor ? { ...jsonObj.doors.lobbyDoor, color: '#ffcc00' } : null;
+            newData.finishLine = null;
+        } else {
+            newData.finishLine = jsonObj.finishLine ? { ...jsonObj.finishLine, color: '#00ff66' } : null;
+            newData.skinDoor = null;
+            newData.lobbyDoor = null;
+        }
+        return newData;
+    }
+    
+    function importMapData(newData) {
+        const current = getCurrentData();
+        Object.keys(current).forEach(key => delete current[key]);
+        Object.assign(current, newData);
+        saveState();
+        clearSelection();
+        render();
+    }
+    
+    function importFromJsonString(jsonString) {
+        try {
+            const parsed = JSON.parse(jsonString);
+            const validated = validateAndImport(parsed);
+            importMapData(validated);
+            alert(`✅ Successfully imported ${currentMapType} map!`);
+        } catch (err) {
+            alert(`Import failed: ${err.message}`);
+        }
+    }
+    
+    // ----- Canvas events with pan/zoom, axis lock, space pan, wheel zoom -----
+    const canvas = document.getElementById('mapCanvas');
+    const ctx = canvas.getContext('2d');
+    const minimapCanvas = document.getElementById('minimapCanvas');
+    const minimapCtx = minimapCanvas.getContext('2d');
+    
+    let dragStartVirtual = null;
+    let dragSelectedObj = null;
+    let dragAxisLockActive = false;
+    let dragLockedAxis = null;
+    let dragInitialPos = null;
+    
+    function screenToVirtual(screenX, screenY) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        let canvasX = (screenX - rect.left) * scaleX;
+        let canvasY = (screenY - rect.top) * scaleY;
+        let virtualX = viewX + canvasX / zoom;
+        let virtualY = viewY + canvasY / zoom;
+        virtualX = Math.min(Math.max(0, virtualX), VIRTUAL_WIDTH);
+        virtualY = Math.min(Math.max(0, virtualY), VIRTUAL_HEIGHT);
+        return { x: virtualX, y: virtualY };
+    }
+    
+    function startPan(e) {
+        if (spacePressed || e.button === 1 || (e.button === 0 && e.shiftKey)) {
+            e.preventDefault();
+            isPanning = true;
+            panStartX = e.clientX;
+            panStartY = e.clientY;
+            panStartViewX = viewX;
+            panStartViewY = viewY;
+            canvas.style.cursor = 'grabbing';
+        }
+    }
+    
+    function doPan(e) {
+        if (!isPanning) return;
+        e.preventDefault();
+        const dx = e.clientX - panStartX;
+        const dy = e.clientY - panStartY;
+        let newViewX = panStartViewX - dx / zoom;
+        let newViewY = panStartViewY - dy / zoom;
+        newViewX = Math.max(0, Math.min(VIRTUAL_WIDTH - VIEW_WIDTH / zoom, newViewX));
+        newViewY = Math.max(0, Math.min(VIRTUAL_HEIGHT - VIEW_HEIGHT / zoom, newViewY));
+        viewX = newViewX;
+        viewY = newViewY;
+        render();
+        updateViewCoordsDisplay();
+    }
+    
+    function endPan() {
+        isPanning = false;
+        canvas.style.cursor = spacePressed ? 'grab' : 'crosshair';
+    }
+    
+    function onMouseDown(e) {
+        e.preventDefault();
+        if (spacePressed) {
+            startPan(e);
+            return;
+        }
+        const { x, y } = screenToVirtual(e.clientX, e.clientY);
+        if (activeTool === "select") {
+            const obj = findObjectUnderMouse(x, y);
+            if (obj) {
+                selectedObj = { type: obj.type, index: obj.index, ref: obj.ref };
+                updateSelectedInputs();
+                dragStartVirtual = { x, y };
+                dragSelectedObj = selectedObj;
+                dragAxisLockActive = false;
+                dragLockedAxis = null;
+                dragInitialPos = { x: selectedObj.ref.x, y: selectedObj.ref.y };
+                render();
+            } else {
+                clearSelection();
+            }
+        } else {
+            if (e.button === 0) {
+                addObjectAt(x, y);
+            }
+        }
+    }
+    
+    function onMouseMove(e) {
+        if (isPanning) {
+            doPan(e);
+            return;
+        }
+        if (!dragStartVirtual || !dragSelectedObj || activeTool !== "select") return;
+        e.preventDefault();
+        const { x, y } = screenToVirtual(e.clientX, e.clientY);
+        let dx = x - dragStartVirtual.x;
+        let dy = y - dragStartVirtual.y;
+        
+        if (e.shiftKey) {
+            if (!dragAxisLockActive) {
+                dragAxisLockActive = true;
+                if (Math.abs(dx) > Math.abs(dy)) dragLockedAxis = 'x';
+                else dragLockedAxis = 'y';
+            }
+            if (dragLockedAxis === 'x') dy = 0;
+            else dx = 0;
+        } else {
+            dragAxisLockActive = false;
+            dragLockedAxis = null;
+        }
+        
+        if (snapMove) {
+            dx = Math.round(dx / 20) * 20;
+            dy = Math.round(dy / 20) * 20;
+        }
+        
+        let newX = dragInitialPos.x + dx;
+        let newY = dragInitialPos.y + dy;
+        if (dragSelectedObj.ref.w !== undefined) {
+            newX = Math.max(0, Math.min(VIRTUAL_WIDTH - dragSelectedObj.ref.w, newX));
+            newY = Math.max(0, Math.min(VIRTUAL_HEIGHT - dragSelectedObj.ref.h, newY));
+        } else {
+            newX = Math.max(0, Math.min(VIRTUAL_WIDTH - 20, newX));
+            newY = Math.max(0, Math.min(VIRTUAL_HEIGHT - 20, newY));
+        }
+        dragSelectedObj.ref.x = newX;
+        dragSelectedObj.ref.y = newY;
+        render();
+        updateSelectedInputs();
+    }
+    
+    function onMouseUp(e) {
+        if (isPanning) {
+            endPan();
+            return;
+        }
+        if (dragStartVirtual && dragSelectedObj && activeTool === "select") {
+            saveState();
+        }
+        dragStartVirtual = null;
+        dragSelectedObj = null;
+        dragAxisLockActive = false;
+        dragLockedAxis = null;
+    }
+    
+    function onContextMenu(e) {
+        e.preventDefault();
+        const { x, y } = screenToVirtual(e.clientX, e.clientY);
+        const obj = findObjectUnderMouse(x, y);
+        if (obj) deleteObjectByRef(obj);
+        return false;
+    }
+    
+    canvas.addEventListener('mousedown', onMouseDown);
+    canvas.addEventListener('mousemove', onMouseMove);
+    canvas.addEventListener('mouseup', onMouseUp);
+    canvas.addEventListener('contextmenu', onContextMenu);
+    canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? -0.1 : 0.1;
+        setZoom(zoom + delta);
+    });
+    canvas.addEventListener('touchstart', (e) => { e.preventDefault(); onMouseDown(e); });
+    canvas.addEventListener('touchmove', (e) => { e.preventDefault(); onMouseMove(e); });
+    canvas.addEventListener('touchend', onMouseUp);
+    
+    // Keyboard shortcuts
+    window.addEventListener('keydown', (e) => {
+        if (e.code === 'Space') {
+            e.preventDefault();
+            if (!spacePressed) {
+                spacePressed = true;
+                canvas.style.cursor = 'grab';
+            }
+            return;
+        }
+        if (e.ctrlKey && e.key === 'z') {
+            e.preventDefault();
+            if (e.shiftKey) redo(); else undo();
+            return;
+        }
+        if (e.ctrlKey && (e.key === 'y' || (e.key === 'Z' && e.shiftKey))) {
+            e.preventDefault();
+            redo();
+            return;
+        }
+        if (!selectedObj) return;
+        const step = e.shiftKey ? 10 : (e.ctrlKey ? 20 : 1);
+        let dx = 0, dy = 0;
+        let axis = null;
+        if (e.key === 'ArrowLeft') { dx = -step; axis = 'x'; }
+        if (e.key === 'ArrowRight') { dx = step; axis = 'x'; }
+        if (e.key === 'ArrowUp') { dy = -step; axis = 'y'; }
+        if (e.key === 'ArrowDown') { dy = step; axis = 'y'; }
+        if (dx !== 0 || dy !== 0) {
+            e.preventDefault();
+            moveSelected(dx, dy, true, axis);
+        }
+    });
+    
+    window.addEventListener('keyup', (e) => {
+        if (e.code === 'Space') {
+            e.preventDefault();
+            spacePressed = false;
+            canvas.style.cursor = isPanning ? 'grabbing' : 'crosshair';
+        }
+    });
+    
+    // Arrow buttons
+    document.getElementById('moveUp').onclick = () => moveSelected(0, -(snapMove ? 20 : 1), true, 'y');
+    document.getElementById('moveDown').onclick = () => moveSelected(0, (snapMove ? 20 : 1), true, 'y');
+    document.getElementById('moveLeft').onclick = () => moveSelected(-(snapMove ? 20 : 1), 0, true, 'x');
+    document.getElementById('moveRight').onclick = () => moveSelected((snapMove ? 20 : 1), 0, true, 'x');
+    document.getElementById('snapMove').onchange = (e) => snapMove = e.target.checked;
+    document.getElementById('applySelBtn').onclick = () => applyManualMove();
+    document.getElementById('undoBtn').onclick = () => undo();
+    document.getElementById('redoBtn').onclick = () => redo();
+    
+    // Zoom functions
+    function setZoom(newZoom) {
+        const oldZoom = zoom;
+        zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
+        const centerX = viewX + VIEW_WIDTH / oldZoom / 2;
+        const centerY = viewY + VIEW_HEIGHT / oldZoom / 2;
+        viewX = centerX - VIEW_WIDTH / zoom / 2;
+        viewY = centerY - VIEW_HEIGHT / zoom / 2;
+        viewX = Math.max(0, Math.min(VIRTUAL_WIDTH - VIEW_WIDTH / zoom, viewX));
+        viewY = Math.max(0, Math.min(VIRTUAL_HEIGHT - VIEW_HEIGHT / zoom, viewY));
+        updateZoomDisplay();
+        render();
+        updateViewCoordsDisplay();
+    }
+    
+    function updateZoomDisplay() {
+        document.getElementById('zoomValue').innerText = Math.round(zoom * 100) + '%';
+    }
+    
+    function resetView() {
+        zoom = 1.0;
+        viewX = 0;
+        viewY = 0;
+        updateZoomDisplay();
+        render();
+        updateViewCoordsDisplay();
+    }
+    
+    document.getElementById('zoomInBtn').onclick = () => setZoom(zoom + 0.1);
+    document.getElementById('zoomOutBtn').onclick = () => setZoom(zoom - 0.1);
+    document.getElementById('zoomResetBtn').onclick = () => resetView();
+    document.getElementById('panResetBtn').onclick = () => resetView();
+    
+    function updateViewCoordsDisplay() {
+        document.getElementById('viewCoords').innerText = `${Math.round(viewX)},${Math.round(viewY)}`;
+    }
+    
+    // Drawing with pan and zoom (added spawn points)
+    function drawGrid() {
+        if (!showGrid) return;
+        ctx.save();
+        ctx.scale(zoom, zoom);
+        ctx.translate(-viewX, -viewY);
+        ctx.strokeStyle = "#2a1f3a";
+        ctx.lineWidth = 0.5 / zoom;
+        const step = 40;
+        for (let x = 0; x <= VIRTUAL_WIDTH; x += step) {
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, VIRTUAL_HEIGHT);
+            ctx.stroke();
+        }
+        for (let y = 0; y <= VIRTUAL_HEIGHT; y += step) {
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(VIRTUAL_WIDTH, y);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+    
+    function drawRect(obj, color, isDoor = false) {
+        ctx.save();
+        ctx.scale(zoom, zoom);
+        ctx.translate(-viewX, -viewY);
+        ctx.fillStyle = color;
+        ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2 / zoom;
+        ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+        if (isDoor) {
+            ctx.fillStyle = "white";
+            ctx.font = `bold ${14/zoom}px Orbitron`;
+            ctx.fillText("🚪", obj.x + obj.w/2 - 8/zoom, obj.y + obj.h/2 + 5/zoom);
+        }
+        if (selectedObj && selectedObj.ref === obj) {
+            ctx.strokeStyle = "#ffcc00";
+            ctx.lineWidth = 4 / zoom;
+            ctx.strokeRect(obj.x-2, obj.y-2, obj.w+4, obj.h+4);
+        }
+        ctx.restore();
+    }
+    
+    function drawGem(g) {
+        ctx.save();
+        ctx.scale(zoom, zoom);
+        ctx.translate(-viewX, -viewY);
+        ctx.fillStyle = "#00ff66";
+        ctx.beginPath();
+        ctx.arc(g.x, g.y, 12, 0, Math.PI*2);
+        ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.font = `bold ${12/zoom}px monospace`;
+        ctx.fillText("💎", g.x-5, g.y+5);
+        if (selectedObj && selectedObj.ref === g) {
+            ctx.strokeStyle = "#ffcc00";
+            ctx.lineWidth = 3 / zoom;
+            ctx.beginPath();
+            ctx.arc(g.x, g.y, 16, 0, Math.PI*2);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+    
+    function drawSpawnPoint(s) {
+        ctx.save();
+        ctx.scale(zoom, zoom);
+        ctx.translate(-viewX, -viewY);
+        // draw a star/flag
+        ctx.fillStyle = "#FFD966";
+        ctx.shadowBlur = 0;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 10, 0, Math.PI*2);
+        ctx.fill();
+        ctx.fillStyle = "#000";
+        ctx.font = `bold ${12/zoom}px monospace`;
+        ctx.fillText("⭐", s.x-6, s.y+5);
+        if (selectedObj && selectedObj.ref === s) {
+            ctx.strokeStyle = "#ffcc00";
+            ctx.lineWidth = 3 / zoom;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, 14, 0, Math.PI*2);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+    
+    function drawMinimap() {
+        minimapCtx.clearRect(0, 0, minimapCanvas.width, minimapCanvas.height);
+        minimapCtx.fillStyle = "#0c0516";
+        minimapCtx.fillRect(0, 0, minimapCanvas.width, minimapCanvas.height);
+        const scaleX = minimapCanvas.width / VIRTUAL_WIDTH;
+        const scaleY = minimapCanvas.height / VIRTUAL_HEIGHT;
+        const data = getCurrentData();
+        data.platforms.forEach(p => {
+            minimapCtx.fillStyle = "#3a2a5a";
+            minimapCtx.fillRect(p.x * scaleX, p.y * scaleY, p.w * scaleX, p.h * scaleY);
+        });
+        data.hazards.forEach(h => {
+            minimapCtx.fillStyle = "#ff003c";
+            minimapCtx.fillRect(h.x * scaleX, h.y * scaleY, h.w * scaleX, h.h * scaleY);
+        });
+        data.gems.forEach(g => {
+            minimapCtx.fillStyle = "#00ff66";
+            minimapCtx.beginPath();
+            minimapCtx.arc(g.x * scaleX, g.y * scaleY, 3, 0, Math.PI*2);
+            minimapCtx.fill();
+        });
+        data.spawnPoints.forEach(s => {
+            minimapCtx.fillStyle = "#FFD966";
+            minimapCtx.beginPath();
+            minimapCtx.arc(s.x * scaleX, s.y * scaleY, 3, 0, Math.PI*2);
+            minimapCtx.fill();
+        });
+        if (currentMapType === "lobby") {
+            if (data.skinDoor) {
+                minimapCtx.fillStyle = "#ff007f";
+                minimapCtx.fillRect(data.skinDoor.x * scaleX, data.skinDoor.y * scaleY, data.skinDoor.w * scaleX, data.skinDoor.h * scaleY);
+            }
+            if (data.lobbyDoor) {
+                minimapCtx.fillStyle = "#ffcc00";
+                minimapCtx.fillRect(data.lobbyDoor.x * scaleX, data.lobbyDoor.y * scaleY, data.lobbyDoor.w * scaleX, data.lobbyDoor.h * scaleY);
+            }
+        } else {
+            if (data.finishLine) {
+                minimapCtx.fillStyle = "#00ff66";
+                minimapCtx.fillRect(data.finishLine.x * scaleX, data.finishLine.y * scaleY, data.finishLine.w * scaleX, data.finishLine.h * scaleY);
+            }
+        }
+        const vpX = viewX * scaleX;
+        const vpY = viewY * scaleY;
+        const vpW = (VIEW_WIDTH / zoom) * scaleX;
+        const vpH = (VIEW_HEIGHT / zoom) * scaleY;
+        minimapCtx.strokeStyle = "#00f2fe";
+        minimapCtx.lineWidth = 1;
+        minimapCtx.strokeRect(vpX, vpY, vpW, vpH);
+    }
+    
+    function render() {
+        ctx.clearRect(0, 0, VIEW_WIDTH, VIEW_HEIGHT);
+        drawGrid();
+        const data = getCurrentData();
+        data.platforms.forEach(p => drawRect(p, "#3a2a5a"));
+        data.hazards.forEach(h => drawRect(h, "#ff003c"));
+        data.gems.forEach(g => drawGem(g));
+        data.spawnPoints.forEach(s => drawSpawnPoint(s));
+        if (currentMapType === "lobby") {
+            if (data.skinDoor) drawRect(data.skinDoor, "#ff007f", true);
+            if (data.lobbyDoor) drawRect(data.lobbyDoor, "#ffcc00", true);
+        }
+        if (currentMapType === "match" && data.finishLine) {
+            ctx.save();
+            ctx.scale(zoom, zoom);
+            ctx.translate(-viewX, -viewY);
+            ctx.fillStyle = "#00ff66";
+            ctx.fillRect(data.finishLine.x, data.finishLine.y, data.finishLine.w, data.finishLine.h);
+            ctx.fillStyle = "white";
+            ctx.font = `bold ${12/zoom}px Orbitron`;
+            ctx.fillText("FINISH", data.finishLine.x+data.finishLine.w/2-25, data.finishLine.y+data.finishLine.h/2+5);
+            if (selectedObj && selectedObj.ref === data.finishLine) {
+                ctx.strokeStyle = "#ffcc00";
+                ctx.lineWidth = 4 / zoom;
+                ctx.strokeRect(data.finishLine.x-2, data.finishLine.y-2, data.finishLine.w+4, data.finishLine.h+4);
+            }
+            ctx.restore();
+        }
+        updateObjectListUI();
+        updateCurrentMapPreview();
+        drawMinimap();
+    }
+    
+    function updateObjectListUI() {
+        const container = document.getElementById('objectList');
+        const data = getCurrentData();
+        let html = "";
+        html += `<div><strong>📦 Platforms (${data.platforms.length})</strong></div>`;
+        data.platforms.forEach((p, idx) => {
+            html += `<div class="object-item">P${idx} (${Math.round(p.x)},${Math.round(p.y)} ${p.w}x${p.h}) <button onclick="deleteObjectByIndex('platform',${idx})">X</button></div>`;
+        });
+        html += `<div><strong>⚠️ Hazards (${data.hazards.length})</strong></div>`;
+        data.hazards.forEach((h, idx) => {
+            html += `<div class="object-item">H${idx} (${Math.round(h.x)},${Math.round(h.y)}) <button onclick="deleteObjectByIndex('hazard',${idx})">X</button></div>`;
+        });
+        html += `<div><strong>💎 Gems (${data.gems.length})</strong></div>`;
+        data.gems.forEach((g, idx) => {
+            html += `<div class="object-item">G${idx} (${Math.round(g.x)},${Math.round(g.y)}) <button onclick="deleteObjectByIndex('gem',${idx})">X</button></div>`;
+        });
+        html += `<div><strong>⭐ Spawn Points (${data.spawnPoints.length}/6)</strong></div>`;
+        data.spawnPoints.forEach((s, idx) => {
+            html += `<div class="object-item">S${idx+1} (${Math.round(s.x)},${Math.round(s.y)}) <button onclick="deleteObjectByIndex('spawn',${idx})">X</button></div>`;
+        });
+        if (currentMapType === "lobby") {
+            html += `<div><strong>🎨 Skin Door</strong> ${data.skinDoor ? `(${Math.round(data.skinDoor.x)},${Math.round(data.skinDoor.y)})` : 'none'} <button onclick="deleteDoor('skin')">Remove</button></div>`;
+            html += `<div><strong>🚪 Lobby Door</strong> ${data.lobbyDoor ? `(${Math.round(data.lobbyDoor.x)},${Math.round(data.lobbyDoor.y)})` : 'none'} <button onclick="deleteDoor('lobby')">Remove</button></div>`;
+        } else {
+            html += `<div><strong>🏁 Finish Line</strong> ${data.finishLine ? `(${Math.round(data.finishLine.x)},${Math.round(data.finishLine.y)})` : 'none'} <button onclick="deleteFinishLine()">Remove</button></div>`;
+        }
+        container.innerHTML = html;
+    }
+    
+    window.deleteObjectByIndex = function(type, idx) {
+        const data = getCurrentData();
+        if (type === 'platform') data.platforms.splice(idx,1);
+        if (type === 'hazard') data.hazards.splice(idx,1);
+        if (type === 'gem') data.gems.splice(idx,1);
+        if (type === 'spawn') data.spawnPoints.splice(idx,1);
+        if (selectedObj && selectedObj.type === type && selectedObj.index === idx) clearSelection();
+        saveState();
+        render();
+    };
+    window.deleteDoor = function(doorType) {
+        const data = getCurrentData();
+        if (doorType === 'skin') data.skinDoor = null;
+        if (doorType === 'lobby') data.lobbyDoor = null;
+        if (selectedObj && (selectedObj.type === 'skinDoor' || selectedObj.type === 'lobbyDoor')) clearSelection();
+        saveState();
+        render();
+    };
+    window.deleteFinishLine = function() {
+        const data = getCurrentData();
+        if (currentMapType === "match") data.finishLine = null;
+        if (selectedObj && selectedObj.type === 'finish') clearSelection();
+        saveState();
+        render();
+    };
+    
+    function setActiveTool(toolId) {
+        activeTool = toolId;
+        document.querySelectorAll('.mode-btn').forEach(btn => btn.classList.remove('active'));
+        document.getElementById(`tool${toolId.charAt(0).toUpperCase() + toolId.slice(1)}`).classList.add('active');
+        clearSelection();
+        let msg = '';
+        if (toolId === 'select') msg = 'Select mode: click to select, drag or arrow keys to move';
+        else if (toolId === 'spawn') msg = 'Spawn point mode: click to add a spawn flag (max 6)';
+        else msg = `${toolId} mode: click to add new object`;
+        document.getElementById('coordStatus').innerText = msg;
+    }
+    
+    document.getElementById('toolSelect').onclick = () => setActiveTool('select');
+    document.getElementById('toolPlatform').onclick = () => setActiveTool('platform');
+    document.getElementById('toolHazard').onclick = () => setActiveTool('hazard');
+    document.getElementById('toolGem').onclick = () => setActiveTool('gem');
+    document.getElementById('toolSpawn').onclick = () => setActiveTool('spawn');
+    document.getElementById('toolSkinDoor').onclick = () => setActiveTool('skinDoor');
+    document.getElementById('toolLobbyDoor').onclick = () => setActiveTool('lobbyDoor');
+    document.getElementById('toolFinish').onclick = () => setActiveTool('finish');
+    document.getElementById('snapToggle').onclick = function() { snapEnabled = !snapEnabled; this.textContent = snapEnabled ? "🔘 Snap ON" : "🔘 Snap OFF"; };
+    document.getElementById('showGrid').onchange = (e) => { showGrid = e.target.checked; render(); };
+    document.getElementById('clearAllBtn').onclick = () => {
+        if (confirm(`Clear all ${currentMapType} objects?`)) {
+            const empty = { platforms:[], hazards:[], gems:[], spawnPoints:[], skinDoor:null, lobbyDoor:null, finishLine:null };
+            if (currentMapType === "lobby") lobbyData = empty;
+            else matchData = empty;
+            clearSelection();
+            saveState();
+            render();
+        }
+    };
+    
+    // Tab switching
+    document.getElementById('tabLobbyBtn').onclick = () => {
+        currentMapType = "lobby";
+        document.getElementById('tabLobbyBtn').classList.add('active');
+        document.getElementById('tabMatchBtn').classList.remove('active');
+        clearSelection();
+        render();
+    };
+    document.getElementById('tabMatchBtn').onclick = () => {
+        currentMapType = "match";
+        document.getElementById('tabMatchBtn').classList.add('active');
+        document.getElementById('tabLobbyBtn').classList.remove('active');
+        clearSelection();
+        render();
+    };
+    
+    // Export current map only (with spawnPoints)
+    function getCurrentMapExport() {
+        const data = getCurrentData();
+        if (currentMapType === "lobby") {
+            return {
+                platforms: data.platforms,
+                hazards: data.hazards,
+                gems: data.gems.map(g => ({ id: g.id, x: g.x, y: g.y, collected: false })),
+                spawnPoints: data.spawnPoints.map(s => ({ id: s.id, x: s.x, y: s.y })),
+                doors: {
+                    skinDoor: data.skinDoor || { x: 220, y: 390, w: 70, h: 110, color: '#ff007f' },
+                    lobbyDoor: data.lobbyDoor || { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' }
+                }
+            };
+        } else {
+            return {
+                platforms: data.platforms,
+                hazards: data.hazards,
+                gems: data.gems.map(g => ({ id: g.id, x: g.x, y: g.y, collected: false })),
+                spawnPoints: data.spawnPoints.map(s => ({ id: s.id, x: s.x, y: s.y })),
+                finishLine: data.finishLine
+            };
+        }
+    }
+    
+    function updateCurrentMapPreview() {
+        const mapExport = getCurrentMapExport();
+        const jsonStr = JSON.stringify(mapExport, null, 2);
+        document.getElementById('currentMapPreview').innerText = jsonStr.slice(0, 800) + (jsonStr.length > 800 ? "\n... (truncated)" : "");
+    }
+    
+    document.getElementById('copyCurrentMapBtn').onclick = async () => {
+        const mapExport = getCurrentMapExport();
+        const jsonStr = JSON.stringify(mapExport, null, 2);
+        await navigator.clipboard.writeText(jsonStr);
+        alert(`Current ${currentMapType} map JSON copied to clipboard!`);
+    };
+    document.getElementById('saveCurrentMapBtn').onclick = () => {
+        const mapExport = getCurrentMapExport();
+        const jsonStr = JSON.stringify(mapExport, null, 2);
+        const blob = new Blob([jsonStr], {type: "application/json"});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${currentMapType}_map.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+    
+    // Full maps.js export (including spawnPoints)
+    function generateMapsJS() {
+        const lobby = lobbyData;
+        const match = matchData;
+        const exportObj = {
+            lobby: {
+                platforms: lobby.platforms,
+                hazards: lobby.hazards,
+                gems: lobby.gems.map(g => ({ id: g.id, x: g.x, y: g.y, collected: false })),
+                spawnPoints: lobby.spawnPoints.map(s => ({ id: s.id, x: s.x, y: s.y })),
+                doors: {
+                    skinDoor: lobby.skinDoor || { x: 220, y: 390, w: 70, h: 110, color: '#ff007f' },
+                    lobbyDoor: lobby.lobbyDoor || { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' }
+                }
+            },
+            match: {
+                platforms: match.platforms,
+                hazards: match.hazards,
+                gems: match.gems.map(g => ({ id: g.id, x: g.x, y: g.y, collected: false })),
+                spawnPoints: match.spawnPoints.map(s => ({ id: s.id, x: s.x, y: s.y })),
+                finishLine: match.finishLine
+            }
+        };
+        return `// maps.js - Auto generated with Map Creator\nconst MAPS = ${JSON.stringify(exportObj, null, 2)};\nwindow.MAPS = MAPS;`;
+    }
+    
+    document.getElementById('exportClipboard').onclick = async () => {
+        const code = generateMapsJS();
+        await navigator.clipboard.writeText(code);
+        alert("Full maps.js code copied to clipboard!");
+    };
+    document.getElementById('exportFile').onclick = () => {
+        const code = generateMapsJS();
+        const blob = new Blob([code], {type: "text/javascript"});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = "maps.js";
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+    
+    function updateExportPreview() {
+        const code = generateMapsJS();
+        document.getElementById('exportPreview').innerText = code.slice(0, 800) + (code.length > 800 ? "\n... (truncated)" : "");
+    }
+    setInterval(updateExportPreview, 500);
+    
+    // File import
+    document.getElementById('importFileBtn').onclick = () => {
+        document.getElementById('importFileInput').click();
+    };
+    document.getElementById('importFileInput').onchange = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            importFromJsonString(ev.target.result);
+            e.target.value = '';
+        };
+        reader.onerror = () => alert("Error reading file");
+        reader.readAsText(file);
+    };
+    document.getElementById('importTextBtn').onclick = () => {
+        const jsonText = document.getElementById('importJsonText').value.trim();
+        if (!jsonText) {
+            alert("Please paste JSON into the textarea.");
+            return;
+        }
+        importFromJsonString(jsonText);
+        document.getElementById('importJsonText').value = '';
+    };
+    
+    // Initial state saves
+    saveState(); // lobby
+    currentMapType = "match";
+    saveState(); // empty match
+    currentMapType = "lobby";
+    resetView();
+    setActiveTool('select');
+    updateExportPreview();
+</script>
+</body>
+</html>

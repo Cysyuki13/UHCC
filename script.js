@@ -8,6 +8,29 @@ synth.set({
     envelope: { attack: 0.01, decay: 0.1, sustain: 0.2, release: 0.1 }
 });
 
+// Custom pistol sound (MP3)
+let pistolSound = null;
+function loadPistolSound() {
+    pistolSound = new Audio('assets/sounds/pistol_fire.mp3');
+    pistolSound.preload = 'auto';
+}
+loadPistolSound();
+
+let emptyPistolSound = null;
+function loadEmptyPistolSound() {
+    emptyPistolSound = new Audio('assets/sounds/pistol_empty.mp3');
+    emptyPistolSound.preload = 'auto';
+}
+loadEmptyPistolSound();
+
+function playPistolSound() {
+    if (!pistolSound) return;
+    // Only play if Tone context is running (user already clicked)
+    if (Tone.context.state !== 'running') return;
+    pistolSound.currentTime = 0;
+    pistolSound.play().catch(e => console.warn("Pistol sound play failed:", e));
+}
+
 function playSound(type) {
     try {
         if (Tone.context.state !== "running") return;
@@ -53,6 +76,11 @@ const FRICTION = 0.85;
 const MAX_FALL_SPEED = 10;
 const MOVE_SPEED = 3;
 const DASH_SPEED = 14;
+const VOID_Y_THRESHOLD = 1000;
+const BREAK_BOUNDS_OFFSET = 300; // <-- NEW
+
+const PISTOL_PROJECTILE_SPEED = 36;
+window.PISTOL_PROJECTILE_SPEED = PISTOL_PROJECTILE_SPEED;
 
 let currentEngineMode = 'MENU';
 let isHost = false;
@@ -79,8 +107,6 @@ let throwables = [];
 let lastThrowableSnapshot = null;
 let wasDropPressed = false;
 
-const skinDoor = { x: 220, y: 390, w: 70, h: 110, color: '#ff007f' };
-
 let platforms = [];
 let hazards = [];
 let gems = [];
@@ -97,8 +123,9 @@ let camera = {
     minZoom: 1.0, maxZoom: 2.5
 };
 
-const lobbyDoor = { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' };
-const finishLine = { x: 1150, y: 550, w: 70, h: 80, color: '#00ff66' };
+let skinDoor = { x: 220, y: 390, w: 70, h: 110, color: '#ff007f' };
+let lobbyDoor = { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' };
+let finishLine = { x: 1150, y: 550, w: 70, h: 80, color: '#00ff66' };
 
 const PLAYER_COLORS = [
     '#FF0000', '#0000FF', '#000000', '#ffffff', '#FF69B4', '#00FFFF',
@@ -147,37 +174,22 @@ function releaseSlot(peerId) {
 // ============================================================================
 
 function setupLobbyEnvironment() {
-    platforms = [
-        { x: 0, y: 640, w: 1280, h: 40 },
-        { x: 0, y: 0, w: 20, h: 680 },
-        { x: 1260, y: 0, w: 20, h: 680 },
-        { x: 200, y: 500, w: 250, h: 20 },
-        { x: 550, y: 400, w: 300, h: 20 },
-        { x: 900, y: 280, w: 250, h: 20 }
-    ];
-    hazards = [];
-    gems = [];
+    const map = MAPS.lobby;
+    platforms = map.platforms;
+    hazards = map.hazards;
+    gems = map.gems;
+    if (map.doors) {
+        if (map.doors.skinDoor) Object.assign(skinDoor, map.doors.skinDoor);
+        if (map.doors.lobbyDoor) Object.assign(lobbyDoor, map.doors.lobbyDoor);
+    }
 }
 
 function setupActiveMatchEnvironment() {
-    platforms = [
-        { x: 0, y: 680, w: 1280, h: 40 },
-        { x: 0, y: 0, w: 20, h: 680 },
-        { x: 1260, y: 0, w: 20, h: 680 },
-        { x: 150, y: 520, w: 300, h: 20 },
-        { x: 830, y: 520, w: 300, h: 20 },
-        { x: 440, y: 400, w: 400, h: 25 },
-        { x: 380, y: 220, w: 520, h: 20 }
-    ];
-    hazards = [
-        { x: 450, y: 660, w: 380, h: 20 },
-        { x: 230, y: 512, w: 80, h: 8 }
-    ];
-    gems = [
-        { id: 1, x: 640, y: 320, collected: false },
-        { id: 2, x: 250, y: 450, collected: false },
-        { id: 3, x: 1000, y: 450, collected: false }
-    ];
+    const map = MAPS.match;
+    platforms = map.platforms;
+    hazards = map.hazards;
+    gems = map.gems.map(g => ({ ...g, collected: false }));
+    if (map.finishLine) Object.assign(finishLine, map.finishLine);
 }
 
 // ------------------------------------------------------------------
@@ -186,22 +198,18 @@ function setupActiveMatchEnvironment() {
 function hostResetLobby() {
     if (!isHost || currentEngineMode !== 'LOBBY') return;
 
-    // 1. Clear all projectiles and throwables
     projectiles = [];
     throwables = [];
     lastThrowableSnapshot = null;
     lastProjectileSnapshot = null;
 
-    // 2. Clear all world items and respawn the initial pistol
     if (itemManager) {
         itemManager.worldItems = [];
         itemManager.spawnItem(300, 580, 'pistol', 0, true, 3);
     }
 
-    // 3. Reset lobby environment
     setupLobbyEnvironment();
 
-    // 4. Reset timers and race state
     if (lobbyTimerId) {
         clearInterval(lobbyTimerId);
         lobbyTimerId = null;
@@ -216,7 +224,6 @@ function hostResetLobby() {
     firstPlayerFinishTime = -1;
     finishPositions = [];
 
-    // 5. Reset all players: position, velocity, score, item, ammo, ready state, dash
     let idx = 0;
     for (let id in players) {
         const p = players[id];
@@ -237,16 +244,12 @@ function hostResetLobby() {
         p.finished = false;
         p.finishTime = -1;
         p.handAngle = p.facingRight ? 0 : Math.PI;
+        p.eliminated = false;
         idx++;
     }
 
-    // 6. Clear ready players (do NOT change host’s color)
     readyPlayers = {};
-
-    // 7. Reset local player's item reference
     localPlayerItem = null;
-
-    // 8. Increment reset version and broadcast with reset flag
     resetVersion++;
     broadcastToRoom('sync_players', { allPlayers: players, reset: true });
     broadcastToRoom('sync_ready_players', { readyPlayers });
@@ -273,7 +276,6 @@ function updateResetButtonVisibility() {
     }
 }
 
-// Override existing state change functions to call visibility update
 const originalEnterLobbyState = enterLobbyState;
 enterLobbyState = function () {
     originalEnterLobbyState();
@@ -292,7 +294,6 @@ executeLobbyReturnSequence = function () {
     updateResetButtonVisibility();
 };
 
-// Attach event listener to the reset button
 document.addEventListener('DOMContentLoaded', () => {
     const resetBtn = document.getElementById('reset-lobby-btn');
     if (resetBtn) {
@@ -331,8 +332,49 @@ function createPlayerProfile(id, nameTag) {
         lastSeen: Date.now(),
         sizeMultiplier: 1,
         itemType: null, item: null,
-        ammo: 0
+        ammo: 0,
+        eliminated: false
     };
+}
+
+// ============================================================================
+//  VOID DEATH HANDLING
+// ============================================================================
+
+function voidRespawnLobby(player) {
+    player.x = 100;
+    player.y = 500;
+    player.vx = 0;
+    player.vy = 0;
+    player.isGrounded = true;
+    player.jumpsLeft = 2;
+    player.dashCooldown = 0;
+    player.dashTimer = 0;
+    player.isDashing = false;
+    player.dashPushedBy = null;
+    playSound('spike');
+}
+
+function voidEliminateGame(player) {
+    if (player.eliminated) return;
+    player.eliminated = true;
+    player.item = null;
+    player.itemType = null;
+    player.ammo = 0;
+    playSound('spike');
+}
+
+function checkVoidDeath() {
+    if (currentEngineMode !== 'LOBBY' && currentEngineMode !== 'GAME') return;
+    const isGame = (currentEngineMode === 'GAME');
+    for (let id in players) {
+        const p = players[id];
+        if (p.eliminated) continue;
+        if (p.y > VOID_Y_THRESHOLD) {
+            if (!isGame) voidRespawnLobby(p);
+            else voidEliminateGame(p);
+        }
+    }
 }
 
 // ============================================================================
@@ -363,7 +405,7 @@ function broadcastThrowables() {
 // ============================================================================
 
 function spawnBreakParticles(x, y) {
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 20; i++) {
         const angle = Math.random() * Math.PI * 2;
         const speed = 2 + Math.random() * 3;
         pushParticle({
@@ -371,10 +413,15 @@ function spawnBreakParticles(x, y) {
             x, y,
             vx: Math.cos(angle) * speed,
             vy: Math.sin(angle) * speed - 2,
-            life: 0.5 + Math.random() * 0.3, age: 0,
-            size: Math.random() * 3 + 1, radius: 3,
-            bounce: 0.1, friction: 0.95, onGround: false,
-            color: '#ff6600', alpha: 1
+            life: 0.5 + Math.random() * 0.3,
+            age: 0,
+            size: Math.random() * 5 + 4,
+            radius: 3,
+            bounce: 0.1,
+            friction: 0.95,
+            onGround: false,
+            color: '#ff6600',
+            alpha: 1
         });
     }
     playSound('spike');
@@ -387,10 +434,8 @@ function spawnBreakParticles(x, y) {
 function hostDropItem(playerId) {
     const player = players[playerId];
     if (!player || !player.item) return;
-
     const itemType = player.itemType;
     if (!itemType) return;
-
     const ammo = player.item.ammo;
 
     if (ammo === 0) {
@@ -415,7 +460,6 @@ function hostDropItem(playerId) {
     player.itemType = null;
     player.ammo = 0;
     if (playerId === localPlayerId) localPlayerItem = null;
-
     broadcastToRoom('sync_players', { allPlayers: players });
     playSound('gem');
 }
@@ -423,10 +467,8 @@ function hostDropItem(playerId) {
 function hostThrowItem(playerId, angle, power = 14) {
     const player = players[playerId];
     if (!player || !player.item) return;
-
     const itemType = player.itemType;
     if (!itemType) return;
-
     const ammo = player.item.ammo;
 
     const handX = player.x + player.width * 0.5;
@@ -446,7 +488,6 @@ function hostThrowItem(playerId, angle, power = 14) {
     player.itemType = null;
     player.ammo = 0;
     if (playerId === localPlayerId) localPlayerItem = null;
-
     broadcastToRoom('sync_players', { allPlayers: players });
     playSound('door');
 }
@@ -460,13 +501,13 @@ let clientConnections = [];
 let hostConnection = null;
 const HEARTBEAT_TIMEOUT = 5000;
 let hostWatchdogTimer = null;
-let resetVersion = 0;          // incremented on host reset
-let clientResetVersion = 0;    // stored by clients
+let resetVersion = 0;
+let clientResetVersion = 0;
 
 function initHost() {
     switchPanel('panel-status');
     roomCodeString = Math.floor(1000 + Math.random() * 9000).toString();
-    peer = new Peer(`neon-uhub-${roomCodeString}`);
+    peer = new Peer(`uhcc-${roomCodeString}`);
 
     peer.on('open', () => {
         document.getElementById('status-spinner').classList.add('hidden');
@@ -483,7 +524,7 @@ function initHost() {
         itemManager.spawnItem(300, 580, 'pistol', 0, true, 3);
 
         enterLobbyState();
-        updateResetButtonVisibility();  // show reset button for host
+        updateResetButtonVisibility();
         startHostWatchdog();
     });
 
@@ -530,6 +571,7 @@ function setupHostRoutingRules(conn) {
         for (let id in players) {
             safePlayers[id] = { ...players[id] };
             delete safePlayers[id].item;
+            safePlayers[id].eliminated = players[id].eliminated;
         }
         conn.send({
             type: 'init_welcome',
@@ -566,10 +608,7 @@ function setupHostRoutingRules(conn) {
                 break;
             case 'client_input_update':
                 if (players[pkg.senderId]) {
-                    // Ignore updates with an older reset version
-                    if (pkg.payload.resetVersion !== undefined && pkg.payload.resetVersion !== resetVersion) {
-                        break;
-                    }
+                    if (pkg.payload.resetVersion !== undefined && pkg.payload.resetVersion !== resetVersion) break;
                     const pl = players[pkg.senderId];
                     pl.x = pkg.payload.x; pl.y = pkg.payload.y;
                     pl.vx = pkg.payload.vx; pl.vy = pkg.payload.vy;
@@ -627,7 +666,8 @@ function setupHostRoutingRules(conn) {
                     const spawnY = handY + dirY * 20;
                     const projectile = {
                         x: spawnX, y: spawnY,
-                        vx: dirX * 12, vy: dirY * 12,
+                        vx: dirX * PISTOL_PROJECTILE_SPEED,
+                        vy: dirY * PISTOL_PROJECTILE_SPEED,
                         radius: 6, life: 120,
                         ownerId: pkg.senderId,
                         type: 'pistol_ammo',
@@ -667,17 +707,17 @@ function initGuest() {
     peer = new Peer();
     peer.on('open', (id) => {
         localPlayerId = id;
-        hostConnection = peer.connect(`neon-uhub-${roomCodeString}`);
+        hostConnection = peer.connect(`uhcc-${roomCodeString}`);
         itemManager = new ItemManager();
         setupClientRoutingRules(hostConnection);
     });
-    peer.on('error', () => { alert("找不到目標房間代碼"); cancelConnection(); });
+    peer.on('error', () => { alert("Room code not found"); cancelConnection(); });
 }
 
 function setupClientRoutingRules(conn) {
     conn.on('data', (pkg) => {
         switch (pkg.type) {
-            case 'room_full': alert("房間已滿 (上限 6 人)！"); cancelConnection(); break;
+            case 'room_full': alert("Room is full (max 6 players)!"); cancelConnection(); break;
             case 'init_welcome':
                 localPlayerId = pkg.payload.assignedId;
                 players = pkg.payload.allPlayers;
@@ -690,7 +730,11 @@ function setupClientRoutingRules(conn) {
 
                 for (let id in players) {
                     if (players[id].itemType === 'pistol') {
-                        players[id].item = new pistolItem(players[id].ammo || 3);
+                        if (!players[id].item || players[id].item.constructor !== pistolItem) {
+                            players[id].item = new pistolItem(players[id].ammo);
+                        } else {
+                            players[id].item.ammo = players[id].ammo;
+                        }
                     } else {
                         players[id].item = null;
                     }
@@ -721,6 +765,7 @@ function setupClientRoutingRules(conn) {
                             players[id].finishTime = data.finishTime;
                             players[id].itemType = data.itemType;
                             players[id].ammo = data.ammo;
+                            players[id].eliminated = data.eliminated || false;
                         }
                     }
                 }
@@ -740,6 +785,7 @@ function setupClientRoutingRules(conn) {
                         players[localPlayerId].ammo = local.ammo;
                         players[localPlayerId].finished = local.finished;
                         players[localPlayerId].finishTime = local.finishTime;
+                        players[localPlayerId].eliminated = local.eliminated || false;
 
                         keys.ArrowLeft = false;
                         keys.ArrowRight = false;
@@ -775,11 +821,19 @@ function setupClientRoutingRules(conn) {
                     players[localPlayerId].finished = local.finished;
                     players[localPlayerId].finishTime = local.finishTime;
                     players[localPlayerId].ammo = local.ammo;
+                    players[localPlayerId].eliminated = local.eliminated || false;
                 }
                 for (let id in players) {
                     if (players[id].itemType === 'pistol') {
-                        if (!players[id].item || players[id].item.constructor !== pistolItem)
+                        if (!players[id].item || players[id].item.constructor !== pistolItem) {
                             players[id].item = new pistolItem(players[id].ammo);
+                        } else {
+                            players[id].item.ammo = players[id].ammo;
+                        }
+                        const data = pkg.payload.allPlayers[id];
+                        if (data && data.itemCooldown !== undefined) {
+                            players[id].item.cooldown = data.itemCooldown;
+                        }
                     } else {
                         players[id].item = null;
                     }
@@ -826,6 +880,10 @@ function broadcastToRoom(type, payload) {
         for (let id in payload.allPlayers) {
             safe[id] = { ...payload.allPlayers[id] };
             delete safe[id].item;
+            if (payload.allPlayers[id].item && payload.allPlayers[id].item.cooldown !== undefined) {
+                safe[id].itemCooldown = payload.allPlayers[id].item.cooldown;
+            }
+            safe[id].eliminated = payload.allPlayers[id].eliminated;
         }
         msgPayload = { allPlayers: safe, resetVersion: resetVersion };
         if (payload.reset === true) msgPayload.reset = true;
@@ -869,9 +927,9 @@ function disconnectGame() { cancelConnection(); }
 function updateHudDisplays() {
     const count = Object.keys(players).length;
     document.getElementById('player-count-hud').innerText = `${count} / 6`;
-    let stateLabel = "大廳整備中";
-    if (currentEngineMode === 'MENU') stateLabel = "主選單配置中";
-    if (currentEngineMode === 'GAME') stateLabel = "決戰進行中";
+    let stateLabel = "LOBBY";
+    if (currentEngineMode === 'MENU') stateLabel = "UHCC";
+    if (currentEngineMode === 'GAME') stateLabel = "MATCH IN PROGRESS";
     document.getElementById('game-state-hud').innerText = stateLabel;
 }
 
@@ -950,6 +1008,7 @@ function executeActiveMatchStart() {
         players[id].vx = players[id].vy = 0;
         players[id].finished = false;
         players[id].finishTime = -1;
+        players[id].eliminated = false;
         idx++;
     }
     if (isHost) {
@@ -978,7 +1037,8 @@ function checkAndProcessRaceFinish() {
     if (!isHost || currentEngineMode !== 'GAME' || !raceStarted) return;
     for (let id in players) {
         const pl = players[id];
-        if (pl.finished || !checkCollision(pl, finishLine)) continue;
+        if (pl.eliminated || pl.finished) continue;
+        if (!checkCollision(pl, finishLine)) continue;
         pl.finished = true;
         pl.finishTime = Date.now();
         finishPositions.push(id);
@@ -1014,8 +1074,8 @@ function executeMatchEndingSequence(summary) {
     const resText = document.getElementById('match-result');
     overlay.classList.remove('hidden');
     summary.sort((a, b) => b.score - a.score);
-    let resultText = "🏁 比賽結束\n";
-    resultText += summary.slice(0, 3).map((s, i) => `${['🥇', '🥈', '🥉'][i]} ${s.nameTag}: ${s.score} 分`).join('\n');
+    let resultText = "🏁 MATCH OVER\n";
+    resultText += summary.slice(0, 3).map((s, i) => `${['🥇', '🥈', '🥉'][i]} ${s.nameTag}: ${s.score} pts`).join('\n');
     resText.innerText = resultText;
     if (isHost) setTimeout(() => backToInteractiveLobby(), 5000);
 }
@@ -1034,6 +1094,7 @@ function executeLobbyReturnSequence() {
         players[id].x = 100 + idx * 45;
         players[id].y = 500;
         players[id].vx = players[id].vy = 0;
+        players[id].eliminated = false;
         idx++;
     }
     updateResetButtonVisibility();
@@ -1058,6 +1119,7 @@ function resolvePlayerCollisions() {
     for (let i = 0; i < ids.length; i++) {
         for (let j = i + 1; j < ids.length; j++) {
             let p1 = players[ids[i]], p2 = players[ids[j]];
+            if (p1.eliminated || p2.eliminated) continue;
             if (p1.x < p2.x + p2.width && p1.x + p1.width > p2.x &&
                 p1.y < p2.y + p2.height && p1.y + p1.height > p2.y) {
 
@@ -1067,15 +1129,14 @@ function resolvePlayerCollisions() {
                 const overlapBottom = p2.y + p2.height - p1.y;
                 const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
 
-                const DASH_PUSH = 6;   // Slightly increased for better feel, but one-time
+                const DASH_PUSH = 6;
                 const MAX_VICTIM_SPEED = 12;
 
-                // ONE-TIME DASH PUSH (only if not already pushed by this dasher)
                 if (p1.isDashing && !p2.isDashing && p2.dashPushedBy !== p1.id) {
                     const dir = (p1.x + p1.width / 2) > (p2.x + p2.width / 2) ? 1 : -1;
                     p2.vx += dir * DASH_PUSH;
                     p2.vx = Math.min(MAX_VICTIM_SPEED, Math.max(-MAX_VICTIM_SPEED, p2.vx));
-                    p2.dashPushedBy = p1.id;   // Mark as pushed by p1
+                    p2.dashPushedBy = p1.id;
                 } else if (p2.isDashing && !p1.isDashing && p1.dashPushedBy !== p2.id) {
                     const dir = (p2.x + p2.width / 2) > (p1.x + p1.width / 2) ? 1 : -1;
                     p1.vx += dir * DASH_PUSH;
@@ -1091,7 +1152,6 @@ function resolvePlayerCollisions() {
                     p2.dashPushedBy = p1.id;
                 }
 
-                // Positional separation (unchanged)
                 if (minOverlap === overlapLeft || minOverlap === overlapRight) {
                     const sep = Math.min(minOverlap, 5);
                     if (minOverlap === overlapLeft) { p1.x -= sep; p2.x += sep; }
@@ -1112,6 +1172,7 @@ function resolvePlayerCollisions() {
 }
 
 function updateCharacterPhysics(player, dt) {
+    if (player.eliminated) return;
     if (player.dashCooldown > 0) player.dashCooldown -= dt;
     let left = keys.ArrowLeft || touchState.left;
     let right = keys.ArrowRight || touchState.right;
@@ -1457,58 +1518,142 @@ function drawLobbyScoreboard() {
 }
 
 function drawCanvasLevelLayout() {
+    // 1. Static environment
     platforms.forEach(plat => {
-        ctx.fillStyle = '#170c30'; ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
-        ctx.strokeStyle = '#7f00ff'; ctx.lineWidth = 2; ctx.strokeRect(plat.x, plat.y, plat.w, plat.h);
+        ctx.fillStyle = '#170c30';
+        ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+        ctx.strokeStyle = '#7f00ff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(plat.x, plat.y, plat.w, plat.h);
     });
-    hazards.forEach(h => { ctx.fillStyle = '#ff003c'; ctx.fillRect(h.x, h.y, h.w, h.h); });
-    gems.forEach(g => { if (!g.collected) { ctx.fillStyle = '#00ff66'; ctx.beginPath(); ctx.arc(g.x, g.y, 8, 0, Math.PI * 2); ctx.fill(); } });
+
+    hazards.forEach(h => {
+        ctx.fillStyle = '#ff003c';
+        ctx.fillRect(h.x, h.y, h.w, h.h);
+    });
+
+    gems.forEach(g => {
+        if (!g.collected) {
+            ctx.fillStyle = '#00ff66';
+            ctx.beginPath();
+            ctx.arc(g.x, g.y, 8, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    });
+
+    // 2. Doors / Finish line
+    if (currentEngineMode === 'GAME') {
+        ctx.fillStyle = '#00ff66';
+        ctx.fillRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
+        ctx.strokeStyle = '#00cc44';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
+        ctx.fillStyle = '#ffff00';
+        ctx.fillRect(finishLine.x + finishLine.w / 2 - 2, finishLine.y - 30, 4, 30);
+        const time = Date.now() * 0.001;
+        const flagWave = Math.sin(time * 3) * 8;
+        ctx.fillStyle = '#ff007f';
+        ctx.beginPath();
+        ctx.moveTo(finishLine.x + finishLine.w / 2 + 2, finishLine.y - 20);
+        ctx.lineTo(finishLine.x + finishLine.w / 2 + 20 + flagWave, finishLine.y - 25);
+        ctx.lineTo(finishLine.x + finishLine.w / 2 + 20 + flagWave, finishLine.y - 10);
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 12px "Orbitron"';
+        ctx.textAlign = 'center';
+        ctx.fillText('FINISH', finishLine.x + finishLine.w / 2, finishLine.y + finishLine.h / 2 + 3);
+    } else if (currentEngineMode === 'LOBBY') {
+        ctx.shadowColor = skinDoor.color;
+        ctx.shadowBlur = 15;
+        ctx.fillStyle = '#1c0515';
+        ctx.fillRect(skinDoor.x, skinDoor.y, skinDoor.w, skinDoor.h);
+        ctx.strokeStyle = skinDoor.color;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(skinDoor.x, skinDoor.y, skinDoor.w, skinDoor.h);
+        ctx.shadowBlur = 0;
+
+        ctx.shadowColor = lobbyDoor.color;
+        ctx.shadowBlur = 15;
+        ctx.fillStyle = '#2a1a00';
+        ctx.fillRect(lobbyDoor.x, lobbyDoor.y, lobbyDoor.w, lobbyDoor.h);
+        ctx.strokeStyle = lobbyDoor.color;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(lobbyDoor.x, lobbyDoor.y, lobbyDoor.w, lobbyDoor.h);
+        ctx.shadowBlur = 0;
+    }
+
+    // 3. Dynamic objects
     projectiles.forEach(p => {
+        ctx.save();
+        ctx.shadowBlur = 0;
+        ctx.beginPath();
+        const angle = Math.atan2(p.vy, p.vx);
+        const trailLength = 36;
+        const backX = p.x - Math.cos(angle) * trailLength;
+        const backY = p.y - Math.sin(angle) * trailLength;
+        ctx.moveTo(backX, backY);
+        ctx.lineTo(p.x, p.y);
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+        ctx.stroke();
+        ctx.restore();
+
         if (bulletImage.complete) {
-            ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(Math.atan2(p.vy, p.vx));
+            ctx.save();
+            ctx.translate(p.x, p.y);
+            ctx.rotate(angle);
             ctx.drawImage(bulletImage, -p.radius, -p.radius, p.radius * 2, p.radius * 2);
             ctx.restore();
         } else {
-            ctx.fillStyle = '#ffaa44'; ctx.beginPath(); ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); ctx.fill();
-            ctx.fillStyle = '#ff6600'; ctx.beginPath(); ctx.arc(p.x, p.y, p.radius - 2, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#ffaa44';
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#ff6600';
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.radius - 2, 0, Math.PI * 2);
+            ctx.fill();
         }
     });
+
     const MAX_THROWABLE_LIFE = 150;
     for (let t of throwables) {
-        ctx.save(); ctx.translate(t.x, t.y); ctx.rotate(t.angle);
+        ctx.save();
+        ctx.translate(t.x, t.y);
+        ctx.rotate(t.angle);
         const preview = itemManager.getPreviewImage(t.itemType);
         if (preview?.complete) ctx.drawImage(preview, -12, -12, 24, 24);
-        else { ctx.fillStyle = '#ffaa44'; ctx.fillRect(-12, -12, 24, 24); ctx.fillStyle = '#fff'; ctx.font = '12px monospace'; ctx.fillText('?', -4, 4); }
+        else {
+            ctx.fillStyle = '#ffaa44';
+            ctx.fillRect(-12, -12, 24, 24);
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px monospace';
+            ctx.fillText('?', -4, 4);
+        }
         ctx.restore();
+
         const percent = Math.max(0, Math.min(1, (MAX_THROWABLE_LIFE - t.life) / MAX_THROWABLE_LIFE));
         const barX = t.x - 12, barY = t.y - 14;
-        ctx.fillStyle = '#222'; ctx.fillRect(barX, barY, 24, 4);
+        ctx.fillStyle = '#222';
+        ctx.fillRect(barX, barY, 24, 4);
         ctx.fillStyle = t.itemType === 'pistol' ? '#ffaa44' : '#88ff88';
         ctx.fillRect(barX, barY, 24 * percent, 4);
-        ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.5; ctx.strokeRect(barX, barY, 24, 4);
-        ctx.font = 'bold 8px monospace'; ctx.fillStyle = '#fff'; ctx.shadowBlur = 0;
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(barX, barY, 24, 4);
+        ctx.font = 'bold 8px monospace';
+        ctx.fillStyle = '#fff';
+        ctx.shadowBlur = 0;
         ctx.fillText(`${Math.floor(percent * 100)}%`, t.x, barY - 2);
     }
-    if (itemManager) for (let wi of itemManager.worldItems) wi.draw(ctx, itemManager);
-    if (currentEngineMode === 'GAME') {
-        const time = Date.now() * 0.001, flagWave = Math.sin(time * 3) * 8;
-        ctx.fillStyle = '#00ff66'; ctx.fillRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
-        ctx.strokeStyle = '#00cc44'; ctx.lineWidth = 3; ctx.strokeRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
-        ctx.fillStyle = '#ffff00'; ctx.fillRect(finishLine.x + finishLine.w / 2 - 2, finishLine.y - 30, 4, 30);
-        ctx.fillStyle = '#ff007f'; ctx.beginPath(); ctx.moveTo(finishLine.x + finishLine.w / 2 + 2, finishLine.y - 20);
-        ctx.lineTo(finishLine.x + finishLine.w / 2 + 20 + flagWave, finishLine.y - 25);
-        ctx.lineTo(finishLine.x + finishLine.w / 2 + 20 + flagWave, finishLine.y - 10); ctx.fill();
-        ctx.fillStyle = '#fff'; ctx.font = 'bold 12px "Orbitron"'; ctx.textAlign = 'center';
-        ctx.fillText('FINISH', finishLine.x + finishLine.w / 2, finishLine.y + finishLine.h / 2 + 3);
-    } else if (currentEngineMode === 'LOBBY') {
-        ctx.shadowColor = skinDoor.color; ctx.shadowBlur = 15;
-        ctx.fillStyle = '#1c0515'; ctx.fillRect(skinDoor.x, skinDoor.y, skinDoor.w, skinDoor.h);
-        ctx.strokeStyle = skinDoor.color; ctx.lineWidth = 4; ctx.strokeRect(skinDoor.x, skinDoor.y, skinDoor.w, skinDoor.h);
-        ctx.fillStyle = '#fff'; ctx.font = '12px "Orbitron"'; ctx.textAlign = 'center'; ctx.shadowBlur = 0;
-        ctx.shadowColor = lobbyDoor.color; ctx.shadowBlur = 15;
-        ctx.fillStyle = '#2a1a00'; ctx.fillRect(lobbyDoor.x, lobbyDoor.y, lobbyDoor.w, lobbyDoor.h);
-        ctx.strokeStyle = lobbyDoor.color; ctx.lineWidth = 4; ctx.strokeRect(lobbyDoor.x, lobbyDoor.y, lobbyDoor.w, lobbyDoor.h);
-        ctx.shadowBlur = 0;
+
+    if (itemManager) {
+        for (let wi of itemManager.worldItems) {
+            wi.draw(ctx, itemManager);
+        }
+    }
+
+    if (currentEngineMode === 'LOBBY') {
         drawLobbyScoreboard();
     }
 }
@@ -1573,12 +1718,21 @@ function drawCharacterModel(p) {
     } else {
         const rising = p.vy < 0;
         const doubleJump = p.jumpsLeft === 0;
-        if (facingRight) {
-            if (rising) { leftLeg = rightLeg = doubleJump ? DOUBLE_R : JUMP_R; }
-            else { leftLeg = rightLeg = FALL_R; }
+        if (rising) {
+            if (doubleJump) {
+                const spread = 0.45;
+                if (facingRight) {
+                    leftLeg = spread - 0.1;
+                    rightLeg = -spread - 0.3;
+                } else {
+                    leftLeg = spread + 0.3;
+                    rightLeg = -spread + 0.1;
+                }
+            } else {
+                leftLeg = rightLeg = facingRight ? JUMP_R : JUMP_L;
+            }
         } else {
-            if (rising) { leftLeg = rightLeg = doubleJump ? DOUBLE_L : JUMP_L; }
-            else { leftLeg = rightLeg = FALL_L; }
+            leftLeg = rightLeg = facingRight ? FALL_R : FALL_L;
         }
     }
     const drawLeg = (angle, offX) => {
@@ -1650,6 +1804,7 @@ function drawOffscreenRadarIndicators() {
     for (let id in players) {
         if (id === localPlayerId) continue;
         let p = players[id];
+        if (p.eliminated) continue;
         let sx = (p.x + p.width / 2 - camera.x) * camera.zoom;
         let sy = (p.y + p.height / 2 - camera.y) * camera.zoom;
         if (sx < 0 || sx > BASE_WIDTH || sy < 0 || sy > BASE_HEIGHT) {
@@ -1745,10 +1900,12 @@ function enginePipelineTick(timestamp) {
                         x: localPlayer.x, y: localPlayer.y, vx: localPlayer.vx, vy: localPlayer.vy,
                         isGrounded: localPlayer.isGrounded, facingRight: localPlayer.facingRight,
                         isDashing: localPlayer.isDashing, handAngle: calculateHandAngle(localPlayer),
-                        resetVersion: clientResetVersion   // <-- include version
+                        resetVersion: clientResetVersion
                     }
                 });
             }
+            checkVoidDeath();
+
             if (itemManager) {
                 itemManager.update();
                 if (isHost && localPlayer) {
@@ -1788,7 +1945,7 @@ function enginePipelineTick(timestamp) {
                 }
             }
             wasDropPressed = keys.Drop;
-            if (localPlayerItem) localPlayerItem.update();
+            if (localPlayerItem) localPlayerItem.update(dt);
             camera.zoom += (camera.targetZoom - camera.zoom) * 0.1 * dt;
             let targetCamX = (localPlayer.x + localPlayer.width / 2) - (BASE_WIDTH / 2) / camera.zoom;
             let targetCamY = (localPlayer.y + localPlayer.height / 2) - (BASE_HEIGHT / 2) / camera.zoom;
@@ -1800,6 +1957,7 @@ function enginePipelineTick(timestamp) {
         } else {
             camera.zoom = 1; camera.x = camera.y = 0;
         }
+
         // bullets
         for (let i = 0; i < projectiles.length; i++) {
             const p = projectiles[i];
@@ -1818,6 +1976,7 @@ function enginePipelineTick(timestamp) {
             for (let id in players) {
                 if (id === p.ownerId) continue;
                 const t = players[id];
+                if (t.eliminated) continue;
                 const dx = p.x - (t.x + t.width / 2), dy = p.y - (t.y + t.height / 2);
                 if (Math.hypot(dx, dy) < p.radius + t.width / 2) {
                     const angle = Math.atan2(p.vy, p.vx);
@@ -1827,24 +1986,70 @@ function enginePipelineTick(timestamp) {
                 }
             }
         }
-        // throwables
+
+        // throwables (MODIFIED)
         for (let i = 0; i < throwables.length; i++) {
             const t = throwables[i];
             t.vy += THROWABLE_GRAVITY * dt;
             t.angularSpeed *= 0.996;
-            t.x += t.vx * dt; t.y += t.vy * dt;
-            t.life -= dt; t.angle += t.angularSpeed * dt;
-            if (t.life <= 0) {
-                itemManager.spawnItem(t.x - 12, t.y - 12, t.itemType, 0, false, t.ammo);
-                broadcastWorldItems();
-                throwables.splice(i, 1); i--; continue;
+            t.x += t.vx * dt;
+            t.y += t.vy * dt;
+            t.life -= dt;
+            t.angle += t.angularSpeed * dt;
+
+            // === BREAK IF TOO FAR OUTSIDE MAP ===
+            const breakX = (t.x + t.radius < -BREAK_BOUNDS_OFFSET || t.x - t.radius > BASE_WIDTH + BREAK_BOUNDS_OFFSET);
+            const breakY = (t.y + t.radius < -BREAK_BOUNDS_OFFSET || t.y - t.radius > BASE_HEIGHT + BREAK_BOUNDS_OFFSET);
+            if (breakX || breakY) {
+                for (let s = 0; s < 8; s++) {
+                    particles.push({
+                        x: t.x, y: t.y,
+                        vx: (Math.random() - 0.5) * 4,
+                        vy: (Math.random() - 0.5) * 4,
+                        life: 0.4, age: 0,
+                        size: Math.random() * 4 + 2,
+                        color: '#ffaa44', alpha: 1
+                    });
+                }
+                playSound('spike');
+                throwables.splice(i, 1);
+                i--;
+                continue;
             }
+
+            if (t.life <= 0) {
+                const spawnX = t.x - 12, spawnY = t.y - 12;
+                if (spawnX > -BREAK_BOUNDS_OFFSET && spawnX < BASE_WIDTH + BREAK_BOUNDS_OFFSET &&
+                    spawnY > -BREAK_BOUNDS_OFFSET && spawnY < BASE_HEIGHT + BREAK_BOUNDS_OFFSET) {
+                    itemManager.spawnItem(spawnX, spawnY, t.itemType, 0, false, t.ammo);
+                    broadcastWorldItems();
+                }
+                throwables.splice(i, 1);
+                i--;
+                continue;
+            }
+
             let bounced = false;
-            if (t.x - t.radius < 0) { t.x = t.radius; t.vx = -t.vx * 0.4; t.angularSpeed = -t.angularSpeed * 0.8 + (Math.random() - 0.5) * 0.1; bounced = true; }
-            if (t.x + t.radius > BASE_WIDTH) { t.x = BASE_WIDTH - t.radius; t.vx = -t.vx * 0.4; bounced = true; }
-            if (t.y - t.radius < 0) { t.y = t.radius; t.vy = -t.vy * 0.4; bounced = true; }
-            if (t.y + t.radius > BASE_HEIGHT) { t.y = BASE_HEIGHT - t.radius; t.vy = -t.vy * 0.4; bounced = true; }
+            if (t.x - t.radius < 0 && t.x + t.radius > -BREAK_BOUNDS_OFFSET) {
+                t.x = t.radius;
+                t.vx = -t.vx * 0.4;
+                t.angularSpeed = -t.angularSpeed * 0.8 + (Math.random() - 0.5) * 0.1;
+                bounced = true;
+            }
+            if (t.x + t.radius > BASE_WIDTH && t.x - t.radius < BASE_WIDTH + BREAK_BOUNDS_OFFSET) {
+                t.x = BASE_WIDTH - t.radius;
+                t.vx = -t.vx * 0.4;
+                bounced = true;
+            }
+            if (t.y - t.radius < 0 && t.y + t.radius > -BREAK_BOUNDS_OFFSET) {
+                t.y = t.radius;
+                t.vy = -t.vy * 0.4;
+                bounced = true;
+            }
+            // BOTTOM BOUNCE REMOVED – items fall into void
             if (bounced) continue;
+
+            // --- platform collisions ---
             let hitPlatform = false;
             for (let plat of platforms) {
                 if (t.x + t.radius > plat.x && t.x - t.radius < plat.x + plat.w && t.y + t.radius > plat.y && t.y - t.radius < plat.y + plat.h) {
@@ -1865,6 +2070,8 @@ function enginePipelineTick(timestamp) {
                 }
             }
             if (hitPlatform) continue;
+
+            // --- hazard collisions ---
             let hitHazard = false;
             for (let h of hazards) {
                 if (t.x + t.radius > h.x && t.x - t.radius < h.x + h.w && t.y + t.radius > h.y && t.y - t.radius < h.y + h.h) {
@@ -1884,9 +2091,12 @@ function enginePipelineTick(timestamp) {
                 }
             }
             if (hitHazard) continue;
+
+            // --- player collisions ---
             for (let id in players) {
                 if (id === t.ownerId) continue;
                 const target = players[id];
+                if (target.eliminated) continue;
                 const dx = t.x - (target.x + target.width / 2), dy = t.y - (target.y + target.height / 2);
                 const dist = Math.hypot(dx, dy);
                 if (dist < t.radius + target.width / 2) {
@@ -1912,6 +2122,7 @@ function enginePipelineTick(timestamp) {
                 }
             }
         }
+
         if (isHost) broadcastThrowables();
         if (isHost) broadcastProjectiles();
         ctx.save(); ctx.scale(camera.zoom, camera.zoom); ctx.translate(-camera.x, -camera.y);
@@ -1919,6 +2130,7 @@ function enginePipelineTick(timestamp) {
         updateAndRenderParticles();
         for (let id in players) {
             let p = players[id];
+            if (p.eliminated) continue;
             if (p.isDashing) {
                 for (let i = 0; i < 2; i++) particles.push({
                     x: p.x + (p.facingRight ? 0 : p.width), y: p.y + Math.random() * p.height,
@@ -1962,6 +2174,7 @@ window.addEventListener('keydown', (e) => {
     if (e.key === 'q' || e.key === 'Q') keys.Drop = true;
     if (e.code === 'ShiftLeft') keys.ShiftLeft = true;
 });
+
 window.addEventListener('keyup', (e) => {
     if (['ArrowLeft', 'a', 'A'].includes(e.key)) keys.ArrowLeft = false;
     if (['ArrowRight', 'd', 'D'].includes(e.key)) keys.ArrowRight = false;
@@ -1970,6 +2183,7 @@ window.addEventListener('keyup', (e) => {
     if (e.key === 'q' || e.key === 'Q') keys.Drop = false;
     if (e.code === 'ShiftLeft') keys.ShiftLeft = false;
 });
+
 window.addEventListener('mousedown', (e) => { if (e.button === 1) { e.preventDefault(); camera.isZoomed = !camera.isZoomed; camera.targetZoom = camera.isZoomed ? 1.75 : 1.0; } });
 window.addEventListener('wheel', (e) => {
     if (currentEngineMode === 'LOBBY' || currentEngineMode === 'GAME') {
@@ -1979,21 +2193,34 @@ window.addEventListener('wheel', (e) => {
         else if (e.deltaY > 0) camera.targetZoom = Math.max(camera.minZoom, camera.targetZoom - sens);
     }
 }, { passive: false });
+
 window.addEventListener('pointerdown', (e) => { if (e.button === 1) e.preventDefault(); });
 canvas.addEventListener('mousedown', (e) => {
     if (currentEngineMode !== 'LOBBY' && currentEngineMode !== 'GAME') return;
     if (e.button !== 0) return;
     if (!localPlayerItem) return;
-    if (!localPlayerItem.canUse()) return;
 
-    if (localPlayerItem.ammo !== undefined && localPlayerItem.ammo <= 0) return;
+    if (localPlayerItem.name === 'pistol' && localPlayerItem.ammo !== undefined && localPlayerItem.ammo <= 0) {
+        if (emptyPistolSound) {
+            emptyPistolSound.currentTime = 0;
+            emptyPistolSound.play().catch(e => console.warn("Empty pistol sound play failed:", e));
+        }
+        return;
+    }
+
+    if (!localPlayerItem.canUse()) return;
 
     if (isHost) {
         const used = localPlayerItem.onUse(players[localPlayerId], { projectiles });
         if (used) {
-            playSound('door');
+            playPistolSound();
             players[localPlayerId].ammo = localPlayerItem.ammo;
             broadcastToRoom('sync_players', { allPlayers: players });
+        } else {
+            if (emptyPistolSound) {
+                emptyPistolSound.currentTime = 0;
+                emptyPistolSound.play().catch(e => console.warn("Empty pistol sound play failed:", e));
+            }
         }
     } else {
         if (localPlayerItem.ammo !== undefined) {
@@ -2007,9 +2234,10 @@ canvas.addEventListener('mousedown', (e) => {
             payload: { handAngle: angle, ammo: localPlayerItem.ammo }
         });
         localPlayerItem.cooldown = localPlayerItem.cooldownMax;
-        playSound('door');
+        playPistolSound();
     }
 });
+
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('mousedown', (e) => {
     if (e.button === 2 && players[localPlayerId] && players[localPlayerId].item) {
