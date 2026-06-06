@@ -2,13 +2,12 @@
 //  SOUND & UI
 // ============================================================================
 
-const synth = new Tone.PolySynth(Tone.Synth).toDestination();
+const synth = new Tone.PolySynth(Tone.Synth, { maxPolyphony: 16 }).toDestination();
 synth.set({
     oscillator: { type: "square8" },
     envelope: { attack: 0.01, decay: 0.1, sustain: 0.2, release: 0.1 }
 });
 
-// Custom pistol sound (MP3)
 let pistolSound = null;
 function loadPistolSound() {
     pistolSound = new Audio('assets/sounds/pistol_fire.mp3');
@@ -25,7 +24,6 @@ loadEmptyPistolSound();
 
 function playPistolSound() {
     if (!pistolSound) return;
-    // Only play if Tone context is running (user already clicked)
     if (Tone.context.state !== 'running') return;
     pistolSound.currentTime = 0;
     pistolSound.play().catch(e => console.warn("Pistol sound play failed:", e));
@@ -66,18 +64,29 @@ const THROWABLE_GRAVITY = 0.35;
 
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
+
+// Canvas render size (fixed)
 const BASE_WIDTH = 1280;
 const BASE_HEIGHT = 720;
 canvas.width = BASE_WIDTH;
 canvas.height = BASE_HEIGHT;
+
+// World size (matches map_creator's virtual size)
+const WORLD_WIDTH = 3840;
+const WORLD_HEIGHT = 2160;
+
+// Camera bounds (per map)
+let cameraBounds = { minX: 0, minY: 0, maxX: WORLD_WIDTH, maxY: WORLD_HEIGHT };
+
+// Void threshold (per map) – default 2000 to avoid immediate death
+let voidYThreshold = 2000;
 
 const GRAVITY = 0.35;
 const FRICTION = 0.85;
 const MAX_FALL_SPEED = 10;
 const MOVE_SPEED = 3;
 const DASH_SPEED = 14;
-const VOID_Y_THRESHOLD = 1000;
-const BREAK_BOUNDS_OFFSET = 300; // <-- NEW
+const BREAK_BOUNDS_OFFSET = 300;
 
 const PISTOL_PROJECTILE_SPEED = 36;
 window.PISTOL_PROJECTILE_SPEED = PISTOL_PROJECTILE_SPEED;
@@ -110,6 +119,27 @@ let wasDropPressed = false;
 let platforms = [];
 let hazards = [];
 let gems = [];
+let spawnPoints = [];
+
+function repositionAllPlayersToSpawnPoints() {
+    if (spawnPoints.length === 0) return;
+    let idx = 0;
+    for (let id in players) {
+        const sp = spawnPoints[idx % spawnPoints.length];
+        players[id].x = sp.x;
+        players[id].y = sp.y;
+        players[id].vx = 0;
+        players[id].vy = 0;
+        players[id].isGrounded = true;
+        players[id].jumpsLeft = 2;
+        players[id].dashCooldown = 0;
+        players[id].dashTimer = 0;
+        players[id].isDashing = false;
+        players[id].dashPushedBy = null;
+        // Do NOT reset score, item, finished, etc. – keep progression
+        idx++;
+    }
+}
 
 let particles = [];
 let bulletImage = new Image();
@@ -170,26 +200,68 @@ function releaseSlot(peerId) {
 }
 
 // ============================================================================
-//  ENVIRONMENT SETUP
+//  ENVIRONMENT SETUP (with camera bounds and void threshold)
 // ============================================================================
 
 function setupLobbyEnvironment() {
+    if (!itemManager) itemManager = new ItemManager();   // <-- ADD THIS
+
     const map = MAPS.lobby;
-    platforms = map.platforms;
-    hazards = map.hazards;
-    gems = map.gems;
+    platforms = map.platforms || [];
+    hazards = map.hazards || [];
+    gems = map.gems || [];
+    // Read spawn points from map
+    spawnPoints = (map.spawnPoints || []).map(sp => ({ x: sp.x, y: sp.y }));
+    if (spawnPoints.length === 0) {
+        spawnPoints = [
+            { x: 100, y: 500 }, { x: 200, y: 500 }, { x: 300, y: 500 },
+            { x: 400, y: 500 }, { x: 500, y: 500 }, { x: 600, y: 500 }
+        ];
+    }
     if (map.doors) {
         if (map.doors.skinDoor) Object.assign(skinDoor, map.doors.skinDoor);
         if (map.doors.lobbyDoor) Object.assign(lobbyDoor, map.doors.lobbyDoor);
     }
+    // Spawn items from map
+    if (map.items && Array.isArray(map.items)) {
+        itemManager.worldItems = [];
+        for (let item of map.items) {
+            itemManager.spawnItem(item.x, item.y, item.itemType, item.initialDelay || 0, item.shouldRespawn !== false, item.ammo || 3);
+        }
+    } else {
+        // default pistol for lobby (only if no items defined)
+        itemManager.worldItems = [];
+        itemManager.spawnItem(300, 580, 'pistol', 0, true, 3);
+    }
+    // Set camera bounds
+    cameraBounds = map.cameraBounds || { minX: 0, minY: 0, maxX: WORLD_WIDTH, maxY: WORLD_HEIGHT };
+    // Set void threshold
+    voidYThreshold = (map.voidYThreshold !== undefined) ? map.voidYThreshold : 2000;
 }
 
 function setupActiveMatchEnvironment() {
     const map = MAPS.match;
-    platforms = map.platforms;
-    hazards = map.hazards;
-    gems = map.gems.map(g => ({ ...g, collected: false }));
+    platforms = map.platforms || [];
+    hazards = map.hazards || [];
+    gems = (map.gems || []).map(g => ({ ...g, collected: false }));
+    // Read spawn points
+    spawnPoints = (map.spawnPoints || []).map(sp => ({ x: sp.x, y: sp.y }));
+    if (spawnPoints.length === 0) {
+        spawnPoints = [{ x: 100, y: 400 }, { x: 150, y: 400 }, { x: 200, y: 400 }];
+    }
     if (map.finishLine) Object.assign(finishLine, map.finishLine);
+    // Items from map
+    if (map.items && Array.isArray(map.items) && itemManager) {
+        itemManager.worldItems = [];
+        for (let item of map.items) {
+            itemManager.spawnItem(item.x, item.y, item.itemType, item.initialDelay || 0, item.shouldRespawn !== false, item.ammo || 3);
+        }
+    } else if (itemManager) {
+        // optional default items (none by default)
+        itemManager.worldItems = [];
+    }
+    cameraBounds = map.cameraBounds || { minX: 0, minY: 0, maxX: WORLD_WIDTH, maxY: WORLD_HEIGHT };
+    voidYThreshold = (map.voidYThreshold !== undefined) ? map.voidYThreshold : 2000;
 }
 
 // ------------------------------------------------------------------
@@ -202,11 +274,6 @@ function hostResetLobby() {
     throwables = [];
     lastThrowableSnapshot = null;
     lastProjectileSnapshot = null;
-
-    if (itemManager) {
-        itemManager.worldItems = [];
-        itemManager.spawnItem(300, 580, 'pistol', 0, true, 3);
-    }
 
     setupLobbyEnvironment();
 
@@ -227,8 +294,9 @@ function hostResetLobby() {
     let idx = 0;
     for (let id in players) {
         const p = players[id];
-        p.x = 100 + idx * 45;
-        p.y = 500;
+        const sp = spawnPoints[idx % spawnPoints.length];
+        p.x = sp.x;
+        p.y = sp.y;
         p.vx = 0;
         p.vy = 0;
         p.isGrounded = true;
@@ -253,7 +321,7 @@ function hostResetLobby() {
     resetVersion++;
     broadcastToRoom('sync_players', { allPlayers: players, reset: true });
     broadcastToRoom('sync_ready_players', { readyPlayers });
-    broadcastToRoom('sync_map', { platforms, hazards, gems });
+    broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
     broadcastWorldItems();
     broadcastToRoom('sync_throwables', { throwables });
     broadcastProjectiles();
@@ -314,8 +382,8 @@ function updatePlayerDimensions(player, multiplier) {
     player.width = CHARACTER_BASE_WIDTH * multiplier;
     player.height = CHARACTER_BASE_HEIGHT * multiplier;
     player.x = oldCenterX - player.width / 2;
-    if (player.x + player.width > 1260) player.x = 1260 - player.width;
-    if (player.x < 20) player.x = 20;
+    if (player.x < 0) player.x = 0;
+    if (player.x + player.width > WORLD_WIDTH) player.x = WORLD_WIDTH - player.width;
 }
 
 function createPlayerProfile(id, nameTag) {
@@ -342,8 +410,18 @@ function createPlayerProfile(id, nameTag) {
 // ============================================================================
 
 function voidRespawnLobby(player) {
-    player.x = 100;
-    player.y = 500;
+    console.warn(`[VOID RESPAWN LOBBY] ${player.id} fell below ${voidYThreshold} from (${player.x},${player.y})`);
+    if (spawnPoints.length === 0) {
+        player.x = 100;
+        player.y = 500;
+    } else {
+        const playerIds = Object.keys(players);
+        const playerIndex = playerIds.indexOf(player.id);
+        const idx = playerIndex % spawnPoints.length;
+        const sp = spawnPoints[idx];
+        player.x = sp.x;
+        player.y = sp.y;
+    }
     player.vx = 0;
     player.vy = 0;
     player.isGrounded = true;
@@ -353,6 +431,7 @@ function voidRespawnLobby(player) {
     player.isDashing = false;
     player.dashPushedBy = null;
     playSound('spike');
+    console.log(`[VOID RESPAWN END] ${player.id} at (${player.x},${player.y})`);
 }
 
 function voidEliminateGame(player) {
@@ -370,7 +449,7 @@ function checkVoidDeath() {
     for (let id in players) {
         const p = players[id];
         if (p.eliminated) continue;
-        if (p.y > VOID_Y_THRESHOLD) {
+        if (p.y > voidYThreshold) {
             if (!isGame) voidRespawnLobby(p);
             else voidEliminateGame(p);
         }
@@ -385,7 +464,8 @@ function createThrowable(itemType, x, y, vx, vy, ownerId, dropItem = false, ammo
     return {
         id: Math.random() + Date.now(),
         itemType, x, y, vx, vy,
-        radius: 12, life: 150,
+        radius: 12,
+        life: 300,
         ownerId, angle: 0,
         angularSpeed: (vx * 0.025) + ((Math.random() - 0.5) * 0.04),
         dropItem, ammo
@@ -520,9 +600,6 @@ function initHost() {
         localPlayerId = "HOST";
         players[localPlayerId] = createPlayerProfile(localPlayerId, claimSlot(localPlayerId));
 
-        itemManager = new ItemManager();
-        itemManager.spawnItem(300, 580, 'pistol', 0, true, 3);
-
         enterLobbyState();
         updateResetButtonVisibility();
         startHostWatchdog();
@@ -564,7 +641,11 @@ function cleanupPlayer(peerId) {
 function setupHostRoutingRules(conn) {
     conn.on('open', () => {
         const newId = conn.peer;
+        const spawnIndex = Object.keys(players).length % spawnPoints.length;
+        const sp = spawnPoints[spawnIndex];
         players[newId] = createPlayerProfile(newId, claimSlot(newId));
+        players[newId].x = sp.x;
+        players[newId].y = sp.y;
         updateHudDisplays();
 
         const safePlayers = {};
@@ -578,7 +659,7 @@ function setupHostRoutingRules(conn) {
             payload: { assignedId: newId, allPlayers: safePlayers, mode: currentEngineMode, readyPlayers, resetVersion }
         });
 
-        broadcastToRoom('sync_map', { platforms, hazards, gems });
+        broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
         broadcastToRoom('sync_players', { allPlayers: players });
         broadcastToRoom('sync_ready_players', { readyPlayers });
 
@@ -791,8 +872,15 @@ function setupClientRoutingRules(conn) {
                         keys.ArrowRight = false;
                         keys.ArrowUp = false;
 
-                        camera.x = local.x - BASE_WIDTH / 2;
-                        camera.y = local.y - BASE_HEIGHT / 2;
+                        // Clamp camera initial position to bounds
+                        let initCamX = local.x - BASE_WIDTH / 2;
+                        let initCamY = local.y - BASE_HEIGHT / 2;
+                        let maxX = cameraBounds.maxX - BASE_WIDTH / camera.zoom;
+                        let maxY = cameraBounds.maxY - BASE_HEIGHT / camera.zoom;
+                        initCamX = Math.max(cameraBounds.minX, Math.min(initCamX, maxX));
+                        initCamY = Math.max(cameraBounds.minY, Math.min(initCamY, maxY));
+                        camera.x = initCamX;
+                        camera.y = initCamY;
 
                         players[localPlayerId].item = null;
                         localPlayerItem = null;
@@ -844,7 +932,17 @@ function setupClientRoutingRules(conn) {
                 updateColorButtonStates();
                 break;
             case 'sync_throwables': throwables = pkg.payload.throwables; break;
-            case 'sync_map': platforms = pkg.payload.platforms; hazards = pkg.payload.hazards; gems = pkg.payload.gems; break;
+            case 'sync_map':
+                platforms = pkg.payload.platforms;
+                hazards = pkg.payload.hazards;
+                gems = pkg.payload.gems;
+                if (pkg.payload.cameraBounds) {
+                    cameraBounds = pkg.payload.cameraBounds;
+                }
+                if (pkg.payload.voidYThreshold !== undefined) {
+                    voidYThreshold = pkg.payload.voidYThreshold;
+                }
+                break;
             case 'sync_lobby_countdown': lobbyCountdownVal = pkg.payload.value; break;
             case 'sync_ready_players': readyPlayers = pkg.payload.readyPlayers; break;
             case 'sync_face_drawing':
@@ -944,6 +1042,19 @@ function enterLobbyState() {
     if (lobbyTimerId) clearInterval(lobbyTimerId);
     document.getElementById('menu-screen').classList.add('hidden');
     setupLobbyEnvironment();
+    repositionAllPlayersToSpawnPoints();
+    // Immediately set camera to local player's position (clamped to bounds)
+    if (players[localPlayerId]) {
+        let targetX = players[localPlayerId].x + players[localPlayerId].width / 2 - BASE_WIDTH / 2 / camera.zoom;
+        let targetY = players[localPlayerId].y + players[localPlayerId].height / 2 - BASE_HEIGHT / 2 / camera.zoom;
+        // Clamp to camera bounds
+        let maxX = cameraBounds.maxX - BASE_WIDTH / camera.zoom;
+        let maxY = cameraBounds.maxY - BASE_HEIGHT / camera.zoom;
+        let minX = cameraBounds.minX;
+        let minY = cameraBounds.minY;
+        camera.x = Math.max(minX, Math.min(targetX, maxX));
+        camera.y = Math.max(minY, Math.min(targetY, maxY));
+    }
     updateHudDisplays();
 }
 
@@ -1003,9 +1114,11 @@ function executeActiveMatchStart() {
     finishPositions = [];
     let idx = 0;
     for (let id in players) {
-        players[id].x = 100 + idx * 50;
-        players[id].y = 400;
-        players[id].vx = players[id].vy = 0;
+        const sp = spawnPoints[idx % spawnPoints.length];
+        players[id].x = sp.x;
+        players[id].y = sp.y;
+        players[id].vx = 0;
+        players[id].vy = 0;
         players[id].finished = false;
         players[id].finishTime = -1;
         players[id].eliminated = false;
@@ -1089,14 +1202,6 @@ function backToInteractiveLobby() {
 function executeLobbyReturnSequence() {
     document.getElementById('gameover-overlay').classList.add('hidden');
     enterLobbyState();
-    let idx = 0;
-    for (let id in players) {
-        players[id].x = 100 + idx * 45;
-        players[id].y = 500;
-        players[id].vx = players[id].vy = 0;
-        players[id].eliminated = false;
-        idx++;
-    }
     updateResetButtonVisibility();
 }
 
@@ -1120,8 +1225,12 @@ function resolvePlayerCollisions() {
         for (let j = i + 1; j < ids.length; j++) {
             let p1 = players[ids[i]], p2 = players[ids[j]];
             if (p1.eliminated || p2.eliminated) continue;
+
             if (p1.x < p2.x + p2.width && p1.x + p1.width > p2.x &&
                 p1.y < p2.y + p2.height && p1.y + p1.height > p2.y) {
+
+                // Log collision
+                console.log(`[COLLISION] ${p1.id} and ${p2.id} at positions (${p1.x.toFixed(2)},${p1.y.toFixed(2)}) and (${p2.x.toFixed(2)},${p2.y.toFixed(2)})`);
 
                 const overlapLeft = p1.x + p1.width - p2.x;
                 const overlapRight = p2.x + p2.width - p1.x;
@@ -1137,11 +1246,13 @@ function resolvePlayerCollisions() {
                     p2.vx += dir * DASH_PUSH;
                     p2.vx = Math.min(MAX_VICTIM_SPEED, Math.max(-MAX_VICTIM_SPEED, p2.vx));
                     p2.dashPushedBy = p1.id;
+                    console.log(`[DASH PUSH] ${p1.id} dashes into ${p2.id}, new vx=${p2.vx}`);
                 } else if (p2.isDashing && !p1.isDashing && p1.dashPushedBy !== p2.id) {
                     const dir = (p2.x + p2.width / 2) > (p1.x + p1.width / 2) ? 1 : -1;
                     p1.vx += dir * DASH_PUSH;
                     p1.vx = Math.min(MAX_VICTIM_SPEED, Math.max(-MAX_VICTIM_SPEED, p1.vx));
                     p1.dashPushedBy = p2.id;
+                    console.log(`[DASH PUSH] ${p2.id} dashes into ${p1.id}, new vx=${p1.vx}`);
                 } else if (p1.isDashing && p2.isDashing && p1.dashPushedBy !== p2.id && p2.dashPushedBy !== p1.id) {
                     const dir = (p1.x + p1.width / 2) > (p2.x + p2.width / 2) ? 1 : -1;
                     p1.vx -= dir * DASH_PUSH * 0.7;
@@ -1150,17 +1261,37 @@ function resolvePlayerCollisions() {
                     p2.vx = Math.min(MAX_VICTIM_SPEED, Math.max(-MAX_VICTIM_SPEED, p2.vx));
                     p1.dashPushedBy = p2.id;
                     p2.dashPushedBy = p1.id;
+                    console.log(`[DASH CLASH] ${p1.id} and ${p2.id} bounce`);
                 }
 
+                const sep = minOverlap / 2;
+                const oldX1 = p1.x, oldY1 = p1.y, oldX2 = p2.x, oldY2 = p2.y;
+
                 if (minOverlap === overlapLeft || minOverlap === overlapRight) {
-                    const sep = Math.min(minOverlap, 5);
-                    if (minOverlap === overlapLeft) { p1.x -= sep; p2.x += sep; }
-                    else { p1.x += sep; p2.x -= sep; }
+                    if (minOverlap === overlapLeft) {
+                        p1.x -= sep;
+                        p2.x += sep;
+                    } else {
+                        p1.x += sep;
+                        p2.x -= sep;
+                    }
                 } else {
-                    const sep = Math.min(minOverlap, 5);
-                    if (minOverlap === overlapTop) { p1.y -= sep; p2.y += sep; }
-                    else { p1.y += sep; p2.y -= sep; }
+                    if (minOverlap === overlapTop) {
+                        p1.y -= sep;
+                        p2.y += sep;
+                    } else {
+                        p1.y += sep;
+                        p2.y -= sep;
+                    }
                     if (p1.vy > 0 && p2.vy < 0) { p1.vy = 0; p2.vy = 0; }
+                }
+
+                // Log position changes
+                if (oldX1 !== p1.x || oldY1 !== p1.y) {
+                    console.log(`[PLAYER PUSH] ${p1.id}: (${oldX1.toFixed(2)},${oldY1.toFixed(2)}) -> (${p1.x.toFixed(2)},${p1.y.toFixed(2)})`);
+                }
+                if (oldX2 !== p2.x || oldY2 !== p2.y) {
+                    console.log(`[PLAYER PUSH] ${p2.id}: (${oldX2.toFixed(2)},${oldY2.toFixed(2)}) -> (${p2.x.toFixed(2)},${p2.y.toFixed(2)})`);
                 }
 
                 const MAX_PUSH = 18;
@@ -1173,6 +1304,10 @@ function resolvePlayerCollisions() {
 
 function updateCharacterPhysics(player, dt) {
     if (player.eliminated) return;
+
+    // Log before any changes
+    console.log(`[PHYSICS START] ${player.id}: x=${player.x.toFixed(2)}, y=${player.y.toFixed(2)}, vx=${player.vx.toFixed(2)}, vy=${player.vy.toFixed(2)}, grounded=${player.isGrounded}, dashing=${player.isDashing}`);
+
     if (player.dashCooldown > 0) player.dashCooldown -= dt;
     let left = keys.ArrowLeft || touchState.left;
     let right = keys.ArrowRight || touchState.right;
@@ -1181,10 +1316,15 @@ function updateCharacterPhysics(player, dt) {
     let dashJustPressed = shift && !player.wasDashPressed;
     player.wasDashPressed = shift;
 
+    if (left || right) {
+        console.log(`[INPUT] ${player.id}: left=${left}, right=${right}, vx=${player.vx}, x=${player.x}`);
+    }
+
     if (dashJustPressed && player.dashCooldown <= 0 && !player.isDashing) {
         player.isDashing = true;
         player.dashTimer = 10;
         player.dashCooldown = 90;
+        console.log(`[DASH START] ${player.id} facing ${player.facingRight ? 'right' : 'left'}`);
     }
 
     let dashMovementApplied = false;
@@ -1232,6 +1372,7 @@ function updateCharacterPhysics(player, dt) {
                 player.dashTimer = 0;
                 player.vx = 0;
                 dashMovementApplied = true;
+                console.log(`[DASH CANCEL] ${player.id} due to collision`);
                 break;
             } else {
                 player.x = newX;
@@ -1245,6 +1386,7 @@ function updateCharacterPhysics(player, dt) {
             player.isDashing = false;
             player.vx *= 0.4;
             player.dashPushedBy = null;
+            console.log(`[DASH END] ${player.id}`);
         }
     }
 
@@ -1259,7 +1401,11 @@ function updateCharacterPhysics(player, dt) {
             player.vx *= Math.pow(FRICTION, dt);
             if (Math.abs(player.vx) < 0.1) player.vx = 0;
         }
+        const oldX = player.x;
         player.x += player.vx * dt;
+        if (Math.abs(oldX - player.x) > 10) {
+            console.warn(`[LARGE MOVE] ${player.id} moved ${(player.x - oldX).toFixed(2)} in one step!`);
+        }
     }
 
     let dynGravity = GRAVITY;
@@ -1276,49 +1422,93 @@ function updateCharacterPhysics(player, dt) {
             player.jumpsLeft = 1;
             playSound('jump');
             spawnJumpParticles(player.x + player.width / 2, player.y + player.height, true);
+            console.log(`[JUMP] ${player.id} from ground, vy=${player.vy}`);
         } else if (player.jumpsLeft > 0) {
             player.vy = -6;
             player.jumpsLeft = 0;
             playSound('jump');
             spawnJumpParticles(player.x + player.width / 2, player.y + player.height, false);
+            console.log(`[DOUBLE JUMP] ${player.id}, vy=${player.vy}`);
         }
     }
 
-    player.isGrounded = false;
+    // Horizontal platform collision (sides) – snap when moving into wall, regardless of jump state
     platforms.forEach(plat => {
         if (checkCollision(player, plat)) {
-            if (player.vx > 0) player.x = plat.x - player.width;
-            else if (player.vx < 0) player.x = plat.x + plat.w;
-            player.vx = 0;
-            if (player.isDashing) player.isDashing = false;
-        }
-    });
-
-    player.y += player.vy * dt;
-    let landed = false;
-    platforms.forEach(plat => {
-        if (checkCollision(player, plat)) {
-            if (player.vy > 0) {
-                player.y = plat.y - player.height;
-                player.isGrounded = true;
-                landed = true;
-                player.vy = 0;
-            } else if (player.vy < 0) {
-                player.y = plat.y + plat.h;
-                player.vy = 0;
+            const verticalOverlap = (player.y + player.height > plat.y && player.y < plat.y + plat.h);
+            // Only snap if vertically overlapping and moving horizontally
+            if (verticalOverlap && player.vx !== 0) {
+                const oldX = player.x;
+                let newX = player.x;
+                if (player.vx > 0) {
+                    newX = plat.x - player.width;
+                } else if (player.vx < 0) {
+                    newX = plat.x + plat.w;
+                }
+                // Limit snap distance to max 30px to prevent teleportation
+                if (Math.abs(newX - oldX) <= 30) {
+                    player.x = newX;
+                    if (Math.abs(oldX - player.x) > 10) {
+                        console.warn(`[PLATFORM SNAP] ${player.id} moved ${(player.x - oldX).toFixed(2)}px`);
+                    }
+                    player.vx = 0;
+                    if (player.isDashing) player.isDashing = false;
+                } else {
+                    console.warn(`[PLATFORM SNAP BLOCKED] ${player.id} would move ${(newX - oldX).toFixed(2)}px - ignoring`);
+                }
             }
         }
     });
 
-    if (player.x < 20) {
-        player.x = 20;
+    // Vertical movement and landing
+    player.y += player.vy * dt;
+    let landed = false;
+    platforms.forEach(plat => {
+        if (checkCollision(player, plat)) {
+            // Only handle landing if the player is falling and the collision is from above
+            if (player.vy > 0) {
+                // Check if the player's bottom is very close to the platform's top
+                const bottomDiff = (player.y + player.height) - plat.y;
+                if (bottomDiff >= 0 && bottomDiff <= 10) {
+                    // Also require at least 30% horizontal overlap to avoid thin walls causing landing
+                    const horizontalOverlap = Math.min(player.x + player.width - plat.x, plat.x + plat.w - player.x);
+                    if (horizontalOverlap > player.width * 0.3) {
+                        const oldY = player.y;
+                        player.y = plat.y - player.height;
+                        player.isGrounded = true;
+                        landed = true;
+                        player.vy = 0;
+                        if (oldY !== player.y) {
+                            console.log(`[LAND] ${player.id} from y=${oldY.toFixed(2)} to ${player.y.toFixed(2)} on platform at y=${plat.y}`);
+                        }
+                    }
+                }
+            } else if (player.vy < 0) {
+                // Head hit – player hits bottom of a platform while rising
+                const topDiff = plat.y + plat.h - player.y;
+                if (topDiff >= 0 && topDiff <= 10) {
+                    const oldY = player.y;
+                    player.y = plat.y + plat.h;
+                    player.vy = 0;
+                    console.log(`[HEAD HIT] ${player.id} from y=${oldY.toFixed(2)} to ${player.y.toFixed(2)}`);
+                }
+            }
+        }
+    });
+
+    // WORLD BOUNDARIES
+    if (player.x < 0) {
+        console.warn(`[BOUNDARY] ${player.id} hit left wall, was ${player.x}, set to 0`);
+        player.x = 0;
     }
-    if (player.x + player.width > 1260) {
-        player.x = 1260 - player.width;
+    if (player.x + player.width > WORLD_WIDTH) {
+        console.warn(`[BOUNDARY] ${player.id} hit right wall, was ${player.x}, set to ${WORLD_WIDTH - player.width}`);
+        player.x = WORLD_WIDTH - player.width;
     }
 
     hazards.forEach(h => {
         if (checkCollision(player, h)) {
+            console.warn(`[HAZARD] ${player.id} hit hazard at (${h.x},${h.y})`);
             player.isDashing = false;
             respawnMatchEntity(player);
         }
@@ -1336,10 +1526,12 @@ function updateCharacterPhysics(player, dt) {
         let target = players[otherId];
         if (player.vy > 0 && player.x + player.width > target.x && player.x < target.x + target.width &&
             player.y + player.height <= target.y + 5 && player.y + player.height + player.vy * dt >= target.y) {
+            const oldY = player.y;
             player.y = target.y - player.height;
             player.vy = 0;
             player.isGrounded = true;
             landed = true;
+            console.log(`[PLAYER LAND] ${player.id} landed on ${target.id}, y from ${oldY.toFixed(2)} to ${player.y.toFixed(2)}`);
         }
     }
 
@@ -1347,6 +1539,9 @@ function updateCharacterPhysics(player, dt) {
         spawnDustParticles(player.x + player.width / 2, player.y + player.height);
         playSound('spike');
     }
+
+    // Log after all physics
+    console.log(`[PHYSICS END] ${player.id}: x=${player.x.toFixed(2)}, y=${player.y.toFixed(2)}, vx=${player.vx.toFixed(2)}, vy=${player.vy.toFixed(2)}, grounded=${player.isGrounded}, dashing=${player.isDashing}`);
 }
 
 function processGemCapture(gemId, targetId) {
@@ -1356,17 +1551,34 @@ function processGemCapture(gemId, targetId) {
         gem.collected = true;
         if (players[targetId]) players[targetId].score += 10;
         playSound('gem');
-        broadcastToRoom('sync_map', { platforms, hazards, gems });
+        broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
         broadcastToRoom('sync_players', { allPlayers: players });
         updateHudDisplays();
     }
 }
 
 function respawnMatchEntity(player) {
-    player.x = 100; player.y = 200; player.vx = player.vy = 0;
+    console.warn(`[RESPAWN MATCH] ${player.id} respawning from (${player.x},${player.y})`);
+    if (spawnPoints.length === 0) {
+        player.x = 100;
+        player.y = 200;
+    } else {
+        const playerIds = Object.keys(players);
+        const playerIndex = playerIds.indexOf(player.id);
+        const idx = playerIndex % spawnPoints.length;
+        const sp = spawnPoints[idx];
+        player.x = sp.x;
+        player.y = sp.y;
+    }
+    player.vx = 0;
+    player.vy = 0;
     player.score = Math.max(0, player.score - 5);
     playSound('spike');
-    if (isHost) { broadcastToRoom('sync_players', { allPlayers: players }); updateHudDisplays(); }
+    if (isHost) {
+        broadcastToRoom('sync_players', { allPlayers: players });
+        updateHudDisplays();
+    }
+    console.log(`[RESPAWN MATCH END] ${player.id} at (${player.x},${player.y})`);
 }
 
 // ============================================================================
@@ -1518,7 +1730,6 @@ function drawLobbyScoreboard() {
 }
 
 function drawCanvasLevelLayout() {
-    // 1. Static environment
     platforms.forEach(plat => {
         ctx.fillStyle = '#170c30';
         ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
@@ -1541,7 +1752,6 @@ function drawCanvasLevelLayout() {
         }
     });
 
-    // 2. Doors / Finish line
     if (currentEngineMode === 'GAME') {
         ctx.fillStyle = '#00ff66';
         ctx.fillRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
@@ -1582,7 +1792,6 @@ function drawCanvasLevelLayout() {
         ctx.shadowBlur = 0;
     }
 
-    // 3. Dynamic objects
     projectiles.forEach(p => {
         ctx.save();
         ctx.shadowBlur = 0;
@@ -1874,7 +2083,7 @@ function drawStartDoorUI() {
 }
 
 // ============================================================================
-//  MAIN GAME LOOP
+//  MAIN GAME LOOP (with camera bounds)
 // ============================================================================
 
 function enginePipelineTick(timestamp) {
@@ -1882,7 +2091,9 @@ function enginePipelineTick(timestamp) {
     let dt = (timestamp - lastTime) / 16.666;
     lastTime = timestamp;
     if (dt > 3.0) dt = 3.0;
-    ctx.fillStyle = '#24212a'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#24212a';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
     if (currentEngineMode === 'LOBBY' || currentEngineMode === 'GAME') {
         let localPlayer = players[localPlayerId];
         if (localPlayer) {
@@ -1949,9 +2160,13 @@ function enginePipelineTick(timestamp) {
             camera.zoom += (camera.targetZoom - camera.zoom) * 0.1 * dt;
             let targetCamX = (localPlayer.x + localPlayer.width / 2) - (BASE_WIDTH / 2) / camera.zoom;
             let targetCamY = (localPlayer.y + localPlayer.height / 2) - (BASE_HEIGHT / 2) / camera.zoom;
-            let maxX = BASE_WIDTH - BASE_WIDTH / camera.zoom, maxY = BASE_HEIGHT - BASE_HEIGHT / camera.zoom;
-            targetCamX = Math.max(0, Math.min(targetCamX, maxX));
-            targetCamY = Math.max(0, Math.min(targetCamY, maxY));
+            // Clamp to camera bounds (not full world)
+            let maxX = cameraBounds.maxX - BASE_WIDTH / camera.zoom;
+            let maxY = cameraBounds.maxY - BASE_HEIGHT / camera.zoom;
+            let minX = cameraBounds.minX;
+            let minY = cameraBounds.minY;
+            targetCamX = Math.max(minX, Math.min(targetCamX, maxX));
+            targetCamY = Math.max(minY, Math.min(targetCamY, maxY));
             camera.x += (targetCamX - camera.x) * 0.1 * dt;
             camera.y += (targetCamY - camera.y) * 0.1 * dt;
         } else {
@@ -1963,7 +2178,9 @@ function enginePipelineTick(timestamp) {
             const p = projectiles[i];
             p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
             if (p.life <= 0) { projectiles.splice(i, 1); i--; continue; }
-            const out = p.x - p.radius < 0 || p.x + p.radius > BASE_WIDTH || p.y - p.radius < 0 || p.y + p.radius > BASE_HEIGHT;
+            // Use WORLD boundaries for removal (full world)
+            const out = p.x + p.radius < 0 || p.x - p.radius > WORLD_WIDTH ||
+                p.y + p.radius < 0 || p.y - p.radius > WORLD_HEIGHT;
             if (out) {
                 for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 });
                 projectiles.splice(i, 1); i--; continue;
@@ -1987,19 +2204,184 @@ function enginePipelineTick(timestamp) {
             }
         }
 
-        // throwables (MODIFIED)
+        // throwables
         for (let i = 0; i < throwables.length; i++) {
             const t = throwables[i];
+
+            // Apply gravity and air resistance
             t.vy += THROWABLE_GRAVITY * dt;
             t.angularSpeed *= 0.996;
-            t.x += t.vx * dt;
-            t.y += t.vy * dt;
-            t.life -= dt;
-            t.angle += t.angularSpeed * dt;
 
-            // === BREAK IF TOO FAR OUTSIDE MAP ===
-            const breakX = (t.x + t.radius < -BREAK_BOUNDS_OFFSET || t.x - t.radius > BASE_WIDTH + BREAK_BOUNDS_OFFSET);
-            const breakY = (t.y + t.radius < -BREAK_BOUNDS_OFFSET || t.y - t.radius > BASE_HEIGHT + BREAK_BOUNDS_OFFSET);
+            // Step movement in smaller increments to prevent tunneling
+            const maxStep = 8; // maximum pixels per step
+            let remainingX = t.vx * dt;
+            let remainingY = t.vy * dt;
+            let steps = Math.max(1, Math.ceil(Math.abs(remainingX) / maxStep), Math.ceil(Math.abs(remainingY) / maxStep));
+            const stepX = remainingX / steps;
+            const stepY = remainingY / steps;
+
+            for (let step = 0; step < steps; step++) {
+                t.x += stepX;
+                t.y += stepY;
+
+                // Life decreases with time, not per step
+                t.life -= dt / steps;
+                t.angle += t.angularSpeed * dt / steps;
+
+                // Early break if life expired
+                if (t.life <= 0) break;
+
+                // --- World boundaries (with offset) ---
+                let bounced = false;
+                if (t.x - t.radius < 0 && t.x + t.radius > -BREAK_BOUNDS_OFFSET) {
+                    t.x = t.radius;
+                    t.vx = -t.vx * 0.4;
+                    t.angularSpeed = -t.angularSpeed * 0.8 + (Math.random() - 0.5) * 0.1;
+                    bounced = true;
+                }
+                if (t.x + t.radius > WORLD_WIDTH && t.x - t.radius < WORLD_WIDTH + BREAK_BOUNDS_OFFSET) {
+                    t.x = WORLD_WIDTH - t.radius;
+                    t.vx = -t.vx * 0.4;
+                    bounced = true;
+                }
+                if (t.y - t.radius < 0 && t.y + t.radius > -BREAK_BOUNDS_OFFSET) {
+                    t.y = t.radius;
+                    t.vy = -t.vy * 0.4;
+                    bounced = true;
+                }
+                if (bounced) continue;
+
+                // --- Platform collisions (with proper repositioning) ---
+                let hitPlatform = false;
+                for (let plat of platforms) {
+                    if (t.x + t.radius > plat.x && t.x - t.radius < plat.x + plat.w &&
+                        t.y + t.radius > plat.y && t.y - t.radius < plat.y + plat.h) {
+
+                        // Calculate minimum overlap direction
+                        const left = t.x + t.radius - plat.x;
+                        const right = plat.x + plat.w - (t.x - t.radius);
+                        const top = t.y + t.radius - plat.y;
+                        const bottom = plat.y + plat.h - (t.y - t.radius);
+                        const minOver = Math.min(left, right, top, bottom);
+
+                        if (minOver === left || minOver === right) {
+                            t.vx = -t.vx * 0.7;
+                            if (minOver === left) t.x = plat.x - t.radius;
+                            else t.x = plat.x + plat.w + t.radius;
+                        } else {
+                            t.vy = -t.vy * 0.5;
+                            t.vx *= 0.92;
+                            t.angularSpeed *= 0.7;
+                            if (Math.abs(t.vx) < 0.2) t.vx = 0;
+                            if (minOver === top) t.y = plat.y - t.radius;
+                            else t.y = plat.y + plat.h + t.radius;
+                            t.life -= 0.5; // extra life loss on floor impact
+                        }
+                        hitPlatform = true;
+                        break;
+                    }
+                }
+                if (hitPlatform) continue;
+
+                // --- Hazard collisions ---
+                let hitHazard = false;
+                for (let h of hazards) {
+                    if (t.x + t.radius > h.x && t.x - t.radius < h.x + h.w &&
+                        t.y + t.radius > h.y && t.y - t.radius < h.y + h.h) {
+                        const left = t.x + t.radius - h.x;
+                        const right = h.x + h.w - (t.x - t.radius);
+                        const top = t.y + t.radius - h.y;
+                        const bottom = h.y + h.h - (t.y - t.radius);
+                        const minOver = Math.min(left, right, top, bottom);
+                        if (minOver === left || minOver === right) {
+                            t.vx = -t.vx * 0.6;
+                            t.angularSpeed = -t.angularSpeed * 0.9;
+                            if (minOver === left) t.x = h.x - t.radius;
+                            else t.x = h.x + h.w + t.radius;
+                        } else {
+                            t.vy = -t.vy * 0.6;
+                            if (minOver === top) t.y = h.y - t.radius;
+                            else t.y = h.y + h.h + t.radius;
+                        }
+                        hitHazard = true;
+                        break;
+                    }
+                }
+                if (hitHazard) continue;
+
+                // --- Player collisions ---
+                let hitPlayer = false;
+                for (let id in players) {
+                    if (id === t.ownerId) continue;
+                    const target = players[id];
+                    if (target.eliminated) continue;
+                    const dx = t.x - (target.x + target.width / 2);
+                    const dy = t.y - (target.y + target.height / 2);
+                    const dist = Math.hypot(dx, dy);
+                    if (dist < t.radius + target.width / 2) {
+                        const angle = Math.atan2(t.vy, t.vx);
+
+                        if (t.dropItem) {
+                            // Dropped item (empty pistol) – soft bounce
+                            t.vx = Math.cos(angle) * Math.abs(t.vx) * 0.5;
+                            t.vy = Math.sin(angle) * Math.abs(t.vy) * 0.5;
+                            const pushX = dx / dist * (t.radius + target.width / 2);
+                            const pushY = dy / dist * (t.radius + target.height / 2);
+                            t.x += pushX * 0.5;
+                            t.y += pushY * 0.5;
+                            hitPlayer = true;
+                            break;
+                        }
+
+                        // Always apply knockback to target
+                        target.vx += Math.cos(angle) * 15;
+                        target.vy += Math.sin(angle) * 15;
+
+                        if (target.item !== null) {
+                            // Target holds an item – bounce off, don't spawn
+                            t.vx = Math.cos(angle) * Math.abs(t.vx) * 0.7;
+                            t.vy = Math.sin(angle) * Math.abs(t.vy) * 0.7;
+                            t.life = Math.max(t.life - 30, 30);
+                            const pushX = dx / dist * (t.radius + target.width / 2);
+                            const pushY = dy / dist * (t.radius + target.height / 2);
+                            t.x += pushX * 0.8;
+                            t.y += pushY * 0.8;
+                            playSound('spike');
+                            hitPlayer = true;
+                            break;
+                        } else {
+                            // Target has no item – spawn item and remove throwable
+                            const dropX = target.x + target.width / 2 - 12;
+                            const dropY = target.y + target.height - 12;
+                            itemManager.spawnItem(dropX, dropY, t.itemType, 0, false, t.ammo);
+                            broadcastWorldItems();
+                            throwables.splice(i, 1);
+                            i--;
+                            hitPlayer = true;
+                            break;
+                        }
+                    }
+                }
+                if (hitPlayer) break; // exit step loop because throwable may have been removed
+            }
+
+            // After stepping, if life <= 0 and throwable still exists, spawn item at its position
+            if (throwables[i] && t.life <= 0) {
+                const spawnX = t.x - 12;
+                const spawnY = t.y - 12;
+                if (spawnX > -BREAK_BOUNDS_OFFSET && spawnX < WORLD_WIDTH + BREAK_BOUNDS_OFFSET &&
+                    spawnY > -BREAK_BOUNDS_OFFSET && spawnY < WORLD_HEIGHT + BREAK_BOUNDS_OFFSET) {
+                    itemManager.spawnItem(spawnX, spawnY, t.itemType, 0, false, t.ammo);
+                    broadcastWorldItems();
+                }
+                throwables.splice(i, 1);
+                i--;
+                continue;
+            }
+
+            // Also check for world‑out-of-bounds break after stepping (if life still positive)
+            const breakX = (t.x + t.radius < -BREAK_BOUNDS_OFFSET || t.x - t.radius > WORLD_WIDTH + BREAK_BOUNDS_OFFSET);
+            const breakY = (t.y + t.radius < -BREAK_BOUNDS_OFFSET || t.y - t.radius > WORLD_HEIGHT + BREAK_BOUNDS_OFFSET);
             if (breakX || breakY) {
                 for (let s = 0; s < 8; s++) {
                     particles.push({
@@ -2014,112 +2396,6 @@ function enginePipelineTick(timestamp) {
                 playSound('spike');
                 throwables.splice(i, 1);
                 i--;
-                continue;
-            }
-
-            if (t.life <= 0) {
-                const spawnX = t.x - 12, spawnY = t.y - 12;
-                if (spawnX > -BREAK_BOUNDS_OFFSET && spawnX < BASE_WIDTH + BREAK_BOUNDS_OFFSET &&
-                    spawnY > -BREAK_BOUNDS_OFFSET && spawnY < BASE_HEIGHT + BREAK_BOUNDS_OFFSET) {
-                    itemManager.spawnItem(spawnX, spawnY, t.itemType, 0, false, t.ammo);
-                    broadcastWorldItems();
-                }
-                throwables.splice(i, 1);
-                i--;
-                continue;
-            }
-
-            let bounced = false;
-            if (t.x - t.radius < 0 && t.x + t.radius > -BREAK_BOUNDS_OFFSET) {
-                t.x = t.radius;
-                t.vx = -t.vx * 0.4;
-                t.angularSpeed = -t.angularSpeed * 0.8 + (Math.random() - 0.5) * 0.1;
-                bounced = true;
-            }
-            if (t.x + t.radius > BASE_WIDTH && t.x - t.radius < BASE_WIDTH + BREAK_BOUNDS_OFFSET) {
-                t.x = BASE_WIDTH - t.radius;
-                t.vx = -t.vx * 0.4;
-                bounced = true;
-            }
-            if (t.y - t.radius < 0 && t.y + t.radius > -BREAK_BOUNDS_OFFSET) {
-                t.y = t.radius;
-                t.vy = -t.vy * 0.4;
-                bounced = true;
-            }
-            // BOTTOM BOUNCE REMOVED – items fall into void
-            if (bounced) continue;
-
-            // --- platform collisions ---
-            let hitPlatform = false;
-            for (let plat of platforms) {
-                if (t.x + t.radius > plat.x && t.x - t.radius < plat.x + plat.w && t.y + t.radius > plat.y && t.y - t.radius < plat.y + plat.h) {
-                    const left = t.x + t.radius - plat.x, right = plat.x + plat.w - (t.x - t.radius);
-                    const top = t.y + t.radius - plat.y, bottom = plat.y + plat.h - (t.y - t.radius);
-                    const minOver = Math.min(left, right, top, bottom);
-                    if (minOver === left || minOver === right) {
-                        t.vx = -t.vx * 0.7;
-                        if (minOver === left) t.x = plat.x - t.radius;
-                        else t.x = plat.x + plat.w + t.radius;
-                    } else {
-                        t.vy = -t.vy * 0.5; t.vx *= 0.92; t.angularSpeed *= 0.7;
-                        if (Math.abs(t.vx) < 0.2) t.vx = 0;
-                        if (minOver === top) t.y = plat.y - t.radius;
-                        else t.y = plat.y + plat.h + t.radius;
-                    }
-                    hitPlatform = true; break;
-                }
-            }
-            if (hitPlatform) continue;
-
-            // --- hazard collisions ---
-            let hitHazard = false;
-            for (let h of hazards) {
-                if (t.x + t.radius > h.x && t.x - t.radius < h.x + h.w && t.y + t.radius > h.y && t.y - t.radius < h.y + h.h) {
-                    const left = t.x + t.radius - h.x, right = h.x + h.w - (t.x - t.radius);
-                    const top = t.y + t.radius - h.y, bottom = h.y + h.h - (t.y - t.radius);
-                    const minOver = Math.min(left, right, top, bottom);
-                    if (minOver === left || minOver === right) {
-                        t.vx = -t.vx * 0.6; t.angularSpeed = -t.angularSpeed * 0.9;
-                        if (minOver === left) t.x = h.x - t.radius;
-                        else t.x = h.x + h.w + t.radius;
-                    } else {
-                        t.vy = -t.vy * 0.6;
-                        if (minOver === top) t.y = h.y - t.radius;
-                        else t.y = h.y + h.h + t.radius;
-                    }
-                    hitHazard = true; break;
-                }
-            }
-            if (hitHazard) continue;
-
-            // --- player collisions ---
-            for (let id in players) {
-                if (id === t.ownerId) continue;
-                const target = players[id];
-                if (target.eliminated) continue;
-                const dx = t.x - (target.x + target.width / 2), dy = t.y - (target.y + target.height / 2);
-                const dist = Math.hypot(dx, dy);
-                if (dist < t.radius + target.width / 2) {
-                    if (t.dropItem) {
-                        const angle = Math.atan2(t.vy, t.vx);
-                        t.vx = Math.cos(angle) * Math.abs(t.vx) * 0.5;
-                        t.vy = Math.sin(angle) * Math.abs(t.vy) * 0.5;
-                        const pushX = dx / dist * (t.radius + target.width / 2);
-                        const pushY = dy / dist * (t.radius + target.height / 2);
-                        t.x += pushX * 0.5; t.y += pushY * 0.5;
-                        continue;
-                    } else {
-                        const angle = Math.atan2(t.vy, t.vx);
-                        target.vx += Math.cos(angle) * 15;
-                        target.vy += Math.sin(angle) * 15;
-                        const dropX = target.x + target.width / 2 - 12;
-                        const dropY = target.y + target.height - 12;
-                        itemManager.spawnItem(dropX, dropY, t.itemType, 0, false, t.ammo);
-                        broadcastWorldItems();
-                        throwables.splice(i, 1); i--;
-                        playSound('spike'); break;
-                    }
-                }
             }
         }
 
