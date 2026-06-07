@@ -111,3 +111,7 @@ body {
 .color-btn.border-white.disabled-color::after {
     display: none !important;
 }
+
+canvas {
+    touch-action: none;
+}

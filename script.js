@@ -54,6 +54,58 @@ function switchPanel(panelId) {
 }
 
 // ============================================================================
+//  SHOOT & THROW ACTIONS (reusable for mouse/keyboard and mobile)
+// ============================================================================
+
+function performShoot() {
+    if (!localPlayerItem) return;
+    if (players[localPlayerId]?.eliminated) return;
+    if (localPlayerItem.name === 'pistol' && localPlayerItem.ammo !== undefined && localPlayerItem.ammo <= 0) {
+        if (emptyPistolSound) {
+            emptyPistolSound.currentTime = 0;
+            emptyPistolSound.play().catch(e => console.warn("Empty pistol sound play failed:", e));
+        }
+        return;
+    }
+    if (!localPlayerItem.canUse()) return;
+    if (isHost) {
+        const used = localPlayerItem.onUse(players[localPlayerId], { projectiles });
+        if (used) {
+            playPistolSound();
+            players[localPlayerId].ammo = localPlayerItem.ammo;
+            broadcastToRoom('sync_players', { allPlayers: players });
+        } else if (emptyPistolSound) {
+            emptyPistolSound.currentTime = 0;
+            emptyPistolSound.play().catch(e => console.warn("Empty pistol sound play failed:", e));
+        }
+    } else {
+        if (localPlayerItem.ammo !== undefined) {
+            localPlayerItem.ammo--;
+            players[localPlayerId].ammo = localPlayerItem.ammo;
+        }
+        const angle = calculateHandAngle(players[localPlayerId]);
+        hostConnection.send({
+            type: 'client_shoot',
+            senderId: localPlayerId,
+            payload: { handAngle: angle, ammo: localPlayerItem.ammo }
+        });
+        localPlayerItem.cooldown = localPlayerItem.cooldownMax;
+        playPistolSound();
+    }
+}
+
+function performThrow() {
+    if (!players[localPlayerId] || !players[localPlayerId].item) return;
+    if (players[localPlayerId].eliminated) return;
+    const angle = calculateHandAngle(players[localPlayerId]);
+    if (!isHost && hostConnection?.open) {
+        hostConnection.send({ type: 'request_throw_item', senderId: localPlayerId, payload: { angle } });
+    } else if (isHost) {
+        hostThrowItem(localPlayerId, angle);
+    }
+}
+
+// ============================================================================
 //  GLOBALS & CONSTANTS
 // ============================================================================
 
@@ -121,6 +173,43 @@ let hazards = [];
 let gems = [];
 let spawnPoints = [];
 
+// Spectator mode
+let spectatorMode = false;
+let spectatorTargetId = null;
+let spectatorCycleButtonsAdded = false;
+
+function getAlivePlayers() {
+    return Object.values(players).filter(p => !p.eliminated);
+}
+
+function cycleSpectator(direction) {
+    if (!spectatorMode || currentEngineMode !== 'GAME') return;
+    const alive = getAlivePlayers();
+    if (alive.length === 0) return;
+    let currentIndex = alive.findIndex(p => p.id === spectatorTargetId);
+    if (currentIndex === -1) currentIndex = 0;
+    let newIndex = (currentIndex + direction + alive.length) % alive.length;
+    spectatorTargetId = alive[newIndex].id;
+    // Update camera immediately
+    updateCameraToTarget();
+}
+
+function updateCameraToTarget() {
+    if (!spectatorMode || !spectatorTargetId) return;
+    const target = players[spectatorTargetId];
+    if (!target) return;
+    let targetCamX = (target.x + target.width / 2) - (BASE_WIDTH / 2) / camera.zoom;
+    let targetCamY = (target.y + target.height / 2) - (BASE_HEIGHT / 2) / camera.zoom;
+    let maxX = cameraBounds.maxX - BASE_WIDTH / camera.zoom;
+    let maxY = cameraBounds.maxY - BASE_HEIGHT / camera.zoom;
+    let minX = cameraBounds.minX;
+    let minY = cameraBounds.minY;
+    targetCamX = Math.max(minX, Math.min(targetCamX, maxX));
+    targetCamY = Math.max(minY, Math.min(targetCamY, maxY));
+    camera.x = targetCamX;
+    camera.y = targetCamY;
+}
+
 function repositionAllPlayersToSpawnPoints() {
     if (spawnPoints.length === 0) return;
     let idx = 0;
@@ -136,7 +225,7 @@ function repositionAllPlayersToSpawnPoints() {
         players[id].dashTimer = 0;
         players[id].isDashing = false;
         players[id].dashPushedBy = null;
-        // Do NOT reset score, item, finished, etc. – keep progression
+        players[id].eliminated = false;    // <-- ADD THIS
         idx++;
     }
 }
@@ -180,6 +269,39 @@ function getMouseWorldPos() {
         y: canvasY / camera.zoom + camera.y
     };
 }
+
+// ------------------------------------------------------------------
+// TOUCH AIMING (mobile)
+// ------------------------------------------------------------------
+function getTouchWorldPos(touch) {
+    const rect = canvas.getBoundingClientRect();
+    const canvasX = (touch.clientX - rect.left) * (canvas.width / rect.width);
+    const canvasY = (touch.clientY - rect.top) * (canvas.height / rect.height);
+    return {
+        x: canvasX / camera.zoom + camera.x,
+        y: canvasY / camera.zoom + camera.y
+    };
+}
+
+function handleTouchAim(e) {
+    if (!players[localPlayerId]) return;
+    if (players[localPlayerId].eliminated) return;
+    e.preventDefault();
+    if (e.touches.length === 0) return;
+    const touch = e.touches[0];
+    const worldPos = getTouchWorldPos(touch);
+    const handX = players[localPlayerId].x + players[localPlayerId].width / 2;
+    const handY = players[localPlayerId].y + 32;
+    const angle = Math.atan2(worldPos.y - handY, worldPos.x - handX);
+    players[localPlayerId].handAngle = angle;
+}
+canvas.addEventListener('touchstart', handleTouchAim);
+canvas.addEventListener('touchmove', handleTouchAim);
+canvas.addEventListener('touchend', (e) => {
+    if (players[localPlayerId] && !players[localPlayerId].eliminated) {
+        players[localPlayerId].handAngle = players[localPlayerId].facingRight ? 0 : Math.PI;
+    }
+});
 
 function getNextAvailableColor() {
     for (let color of PLAYER_COLORS) {
@@ -431,7 +553,6 @@ function voidRespawnLobby(player) {
     player.isDashing = false;
     player.dashPushedBy = null;
     playSound('spike');
-    console.log(`[VOID RESPAWN END] ${player.id} at (${player.x},${player.y})`);
 }
 
 function voidEliminateGame(player) {
@@ -441,6 +562,30 @@ function voidEliminateGame(player) {
     player.itemType = null;
     player.ammo = 0;
     playSound('spike');
+    // If local player eliminated, enter spectator mode
+    if (player.id === localPlayerId && currentEngineMode === 'GAME') {
+        spectatorMode = true;
+        const alive = getAlivePlayers();
+        if (alive.length > 0) {
+            spectatorTargetId = alive[0].id;
+            updateCameraToTarget();
+        } else {
+            // No one alive – match will end soon
+        }
+        // Show spectator UI elements
+        document.getElementById('spectator-controls')?.classList.remove('hidden');
+    }
+    // Host: check if all players eliminated
+    if (isHost && currentEngineMode === 'GAME') {
+        const alive = getAlivePlayers();
+        if (alive.length === 0) {
+            // End match with current scores
+            let results = [];
+            for (let id in players) results.push({ id, nameTag: players[id].nameTag, score: players[id].score });
+            broadcastToRoom('match_over', { summary: results });
+            executeMatchEndingSequence(results);
+        }
+    }
 }
 
 function checkVoidDeath() {
@@ -872,6 +1017,11 @@ function setupClientRoutingRules(conn) {
                         keys.ArrowRight = false;
                         keys.ArrowUp = false;
 
+                        // Reset spectator mode
+                        spectatorMode = false;
+                        spectatorTargetId = null;
+                        document.getElementById('spectator-controls')?.classList.add('hidden');
+
                         // Clamp camera initial position to bounds
                         let initCamX = local.x - BASE_WIDTH / 2;
                         let initCamY = local.y - BASE_HEIGHT / 2;
@@ -1043,11 +1193,14 @@ function enterLobbyState() {
     document.getElementById('menu-screen').classList.add('hidden');
     setupLobbyEnvironment();
     repositionAllPlayersToSpawnPoints();
+    // Reset spectator mode
+    spectatorMode = false;
+    spectatorTargetId = null;
+    document.getElementById('spectator-controls')?.classList.add('hidden');
     // Immediately set camera to local player's position (clamped to bounds)
     if (players[localPlayerId]) {
         let targetX = players[localPlayerId].x + players[localPlayerId].width / 2 - BASE_WIDTH / 2 / camera.zoom;
         let targetY = players[localPlayerId].y + players[localPlayerId].height / 2 - BASE_HEIGHT / 2 / camera.zoom;
-        // Clamp to camera bounds
         let maxX = cameraBounds.maxX - BASE_WIDTH / camera.zoom;
         let maxY = cameraBounds.maxY - BASE_HEIGHT / camera.zoom;
         let minX = cameraBounds.minX;
@@ -1055,6 +1208,8 @@ function enterLobbyState() {
         camera.x = Math.max(minX, Math.min(targetX, maxX));
         camera.y = Math.max(minY, Math.min(targetY, maxY));
     }
+    timerVal = 60;                         // reset match timer display
+    document.getElementById('timer').innerText = timerVal;
     updateHudDisplays();
 }
 
@@ -1112,6 +1267,14 @@ function executeActiveMatchStart() {
     firstPlayerFinishTime = -1;
     raceCountdownVal = -1;
     finishPositions = [];
+
+    // Clear any leftover projectiles, throwables, particles
+    projectiles = [];
+    throwables = [];
+    particles = [];
+    lastThrowableSnapshot = null;
+    lastProjectileSnapshot = null;
+
     let idx = 0;
     for (let id in players) {
         const sp = spawnPoints[idx % spawnPoints.length];
@@ -1122,8 +1285,23 @@ function executeActiveMatchStart() {
         players[id].finished = false;
         players[id].finishTime = -1;
         players[id].eliminated = false;
+
+        // Reset player inventory (items picked up in lobby)
+        players[id].item = null;
+        players[id].itemType = null;
+        players[id].ammo = 0;
+
         idx++;
     }
+
+    // Reset local player's item reference
+    localPlayerItem = null;
+
+    // Reset spectator mode
+    spectatorMode = false;
+    spectatorTargetId = null;
+    document.getElementById('spectator-controls')?.classList.add('hidden');
+
     if (isHost) {
         timerVal = 60;
         if (gameTimer) clearInterval(gameTimer);
@@ -1183,6 +1361,16 @@ function checkAndProcessRaceFinish() {
 }
 
 function executeMatchEndingSequence(summary) {
+    // Stop match timers
+    if (gameTimer) {
+        clearInterval(gameTimer);
+        gameTimer = null;
+    }
+    if (raceTimerId) {
+        clearInterval(raceTimerId);
+        raceTimerId = null;
+    }
+
     const overlay = document.getElementById('gameover-overlay');
     const resText = document.getElementById('match-result');
     overlay.classList.remove('hidden');
@@ -1200,8 +1388,50 @@ function backToInteractiveLobby() {
 }
 
 function executeLobbyReturnSequence() {
+    // Hide game over overlay
     document.getElementById('gameover-overlay').classList.add('hidden');
+
+    // Stop any remaining match timers
+    if (gameTimer) {
+        clearInterval(gameTimer);
+        gameTimer = null;
+    }
+    if (raceTimerId) {
+        clearInterval(raceTimerId);
+        raceTimerId = null;
+    }
+
+    // Reset match-specific flags
+    raceStarted = false;
+    firstPlayerFinishTime = -1;
+    raceCountdownVal = -1;
+    finishPositions = [];
+
+    // Reset all players for lobby
+    for (let id in players) {
+        players[id].eliminated = false;
+        players[id].finished = false;
+        players[id].finishTime = -1;
+        players[id].score = 0;           // optional – keep if you want persistent scores
+        players[id].item = null;
+        players[id].itemType = null;
+        players[id].ammo = 0;
+    }
+
+    // Reset spectator mode
+    spectatorMode = false;
+    spectatorTargetId = null;
+
+    // Enter lobby state (reloads map, positions players, etc.)
     enterLobbyState();
+
+    // Ensure the host broadcasts the reset state to any clients
+    if (isHost) {
+        broadcastToRoom('sync_players', { allPlayers: players, reset: true });
+        broadcastToRoom('sync_lobby_countdown', { value: -1 });
+        // Also reset throwables and projectiles on host side (they are cleared in enterLobbyState)
+    }
+
     updateResetButtonVisibility();
 }
 
@@ -1230,8 +1460,6 @@ function resolvePlayerCollisions() {
                 p1.y < p2.y + p2.height && p1.y + p1.height > p2.y) {
 
                 // Log collision
-                console.log(`[COLLISION] ${p1.id} and ${p2.id} at positions (${p1.x.toFixed(2)},${p1.y.toFixed(2)}) and (${p2.x.toFixed(2)},${p2.y.toFixed(2)})`);
-
                 const overlapLeft = p1.x + p1.width - p2.x;
                 const overlapRight = p2.x + p2.width - p1.x;
                 const overlapTop = p1.y + p1.height - p2.y;
@@ -1246,13 +1474,11 @@ function resolvePlayerCollisions() {
                     p2.vx += dir * DASH_PUSH;
                     p2.vx = Math.min(MAX_VICTIM_SPEED, Math.max(-MAX_VICTIM_SPEED, p2.vx));
                     p2.dashPushedBy = p1.id;
-                    console.log(`[DASH PUSH] ${p1.id} dashes into ${p2.id}, new vx=${p2.vx}`);
                 } else if (p2.isDashing && !p1.isDashing && p1.dashPushedBy !== p2.id) {
                     const dir = (p2.x + p2.width / 2) > (p1.x + p1.width / 2) ? 1 : -1;
                     p1.vx += dir * DASH_PUSH;
                     p1.vx = Math.min(MAX_VICTIM_SPEED, Math.max(-MAX_VICTIM_SPEED, p1.vx));
                     p1.dashPushedBy = p2.id;
-                    console.log(`[DASH PUSH] ${p2.id} dashes into ${p1.id}, new vx=${p1.vx}`);
                 } else if (p1.isDashing && p2.isDashing && p1.dashPushedBy !== p2.id && p2.dashPushedBy !== p1.id) {
                     const dir = (p1.x + p1.width / 2) > (p2.x + p2.width / 2) ? 1 : -1;
                     p1.vx -= dir * DASH_PUSH * 0.7;
@@ -1261,7 +1487,6 @@ function resolvePlayerCollisions() {
                     p2.vx = Math.min(MAX_VICTIM_SPEED, Math.max(-MAX_VICTIM_SPEED, p2.vx));
                     p1.dashPushedBy = p2.id;
                     p2.dashPushedBy = p1.id;
-                    console.log(`[DASH CLASH] ${p1.id} and ${p2.id} bounce`);
                 }
 
                 const sep = minOverlap / 2;
@@ -1287,13 +1512,6 @@ function resolvePlayerCollisions() {
                 }
 
                 // Log position changes
-                if (oldX1 !== p1.x || oldY1 !== p1.y) {
-                    console.log(`[PLAYER PUSH] ${p1.id}: (${oldX1.toFixed(2)},${oldY1.toFixed(2)}) -> (${p1.x.toFixed(2)},${p1.y.toFixed(2)})`);
-                }
-                if (oldX2 !== p2.x || oldY2 !== p2.y) {
-                    console.log(`[PLAYER PUSH] ${p2.id}: (${oldX2.toFixed(2)},${oldY2.toFixed(2)}) -> (${p2.x.toFixed(2)},${p2.y.toFixed(2)})`);
-                }
-
                 const MAX_PUSH = 18;
                 p1.vx = Math.min(MAX_PUSH, Math.max(-MAX_PUSH, p1.vx));
                 p2.vx = Math.min(MAX_PUSH, Math.max(-MAX_PUSH, p2.vx));
@@ -1305,9 +1523,6 @@ function resolvePlayerCollisions() {
 function updateCharacterPhysics(player, dt) {
     if (player.eliminated) return;
 
-    // Log before any changes
-    console.log(`[PHYSICS START] ${player.id}: x=${player.x.toFixed(2)}, y=${player.y.toFixed(2)}, vx=${player.vx.toFixed(2)}, vy=${player.vy.toFixed(2)}, grounded=${player.isGrounded}, dashing=${player.isDashing}`);
-
     if (player.dashCooldown > 0) player.dashCooldown -= dt;
     let left = keys.ArrowLeft || touchState.left;
     let right = keys.ArrowRight || touchState.right;
@@ -1315,16 +1530,10 @@ function updateCharacterPhysics(player, dt) {
     let shift = keys.ShiftLeft;
     let dashJustPressed = shift && !player.wasDashPressed;
     player.wasDashPressed = shift;
-
-    if (left || right) {
-        console.log(`[INPUT] ${player.id}: left=${left}, right=${right}, vx=${player.vx}, x=${player.x}`);
-    }
-
     if (dashJustPressed && player.dashCooldown <= 0 && !player.isDashing) {
         player.isDashing = true;
         player.dashTimer = 10;
         player.dashCooldown = 90;
-        console.log(`[DASH START] ${player.id} facing ${player.facingRight ? 'right' : 'left'}`);
     }
 
     let dashMovementApplied = false;
@@ -1372,7 +1581,6 @@ function updateCharacterPhysics(player, dt) {
                 player.dashTimer = 0;
                 player.vx = 0;
                 dashMovementApplied = true;
-                console.log(`[DASH CANCEL] ${player.id} due to collision`);
                 break;
             } else {
                 player.x = newX;
@@ -1386,7 +1594,6 @@ function updateCharacterPhysics(player, dt) {
             player.isDashing = false;
             player.vx *= 0.4;
             player.dashPushedBy = null;
-            console.log(`[DASH END] ${player.id}`);
         }
     }
 
@@ -1422,13 +1629,11 @@ function updateCharacterPhysics(player, dt) {
             player.jumpsLeft = 1;
             playSound('jump');
             spawnJumpParticles(player.x + player.width / 2, player.y + player.height, true);
-            console.log(`[JUMP] ${player.id} from ground, vy=${player.vy}`);
         } else if (player.jumpsLeft > 0) {
             player.vy = -6;
             player.jumpsLeft = 0;
             playSound('jump');
             spawnJumpParticles(player.x + player.width / 2, player.y + player.height, false);
-            console.log(`[DOUBLE JUMP] ${player.id}, vy=${player.vy}`);
         }
     }
 
@@ -1478,9 +1683,6 @@ function updateCharacterPhysics(player, dt) {
                         player.isGrounded = true;
                         landed = true;
                         player.vy = 0;
-                        if (oldY !== player.y) {
-                            console.log(`[LAND] ${player.id} from y=${oldY.toFixed(2)} to ${player.y.toFixed(2)} on platform at y=${plat.y}`);
-                        }
                     }
                 }
             } else if (player.vy < 0) {
@@ -1490,7 +1692,6 @@ function updateCharacterPhysics(player, dt) {
                     const oldY = player.y;
                     player.y = plat.y + plat.h;
                     player.vy = 0;
-                    console.log(`[HEAD HIT] ${player.id} from y=${oldY.toFixed(2)} to ${player.y.toFixed(2)}`);
                 }
             }
         }
@@ -1510,7 +1711,11 @@ function updateCharacterPhysics(player, dt) {
         if (checkCollision(player, h)) {
             console.warn(`[HAZARD] ${player.id} hit hazard at (${h.x},${h.y})`);
             player.isDashing = false;
-            respawnMatchEntity(player);
+            if (currentEngineMode === 'GAME') {
+                voidEliminateGame(player);
+            } else {
+                respawnMatchEntity(player);
+            }
         }
     });
 
@@ -1531,7 +1736,6 @@ function updateCharacterPhysics(player, dt) {
             player.vy = 0;
             player.isGrounded = true;
             landed = true;
-            console.log(`[PLAYER LAND] ${player.id} landed on ${target.id}, y from ${oldY.toFixed(2)} to ${player.y.toFixed(2)}`);
         }
     }
 
@@ -1539,9 +1743,6 @@ function updateCharacterPhysics(player, dt) {
         spawnDustParticles(player.x + player.width / 2, player.y + player.height);
         playSound('spike');
     }
-
-    // Log after all physics
-    console.log(`[PHYSICS END] ${player.id}: x=${player.x.toFixed(2)}, y=${player.y.toFixed(2)}, vx=${player.vx.toFixed(2)}, vy=${player.vy.toFixed(2)}, grounded=${player.isGrounded}, dashing=${player.isDashing}`);
 }
 
 function processGemCapture(gemId, targetId) {
@@ -1578,7 +1779,6 @@ function respawnMatchEntity(player) {
         broadcastToRoom('sync_players', { allPlayers: players });
         updateHudDisplays();
     }
-    console.log(`[RESPAWN MATCH END] ${player.id} at (${player.x},${player.y})`);
 }
 
 // ============================================================================
@@ -1973,12 +2173,17 @@ function drawCharacterModel(p) {
     }
     const handPivotX = p.x + p.width / 2;
     const handPivotY = p.y + (bodyH * 0.22) + 30;
-    const handAngle = (p.id === localPlayerId) ? calculateHandAngle(p) : (p.handAngle !== undefined ? p.handAngle : (facingRight ? 0 : Math.PI));
+    let handAngle;
+    if (p.id === localPlayerId && !spectatorMode) {
+        handAngle = calculateHandAngle(p);
+    } else {
+        handAngle = p.handAngle !== undefined ? p.handAngle : (facingRight ? 0 : Math.PI);
+    }
     ctx.save(); ctx.translate(handPivotX, handPivotY); ctx.rotate(handAngle);
     ctx.fillStyle = p.color; roundedRect(ctx, 0, -3, 18, 6, 3); ctx.fill(); ctx.stroke();
     ctx.beginPath(); ctx.arc(24, 0, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     ctx.restore();
-    if (p.item) {
+    if (p.item && !p.eliminated) {
         const handX = handPivotX + Math.cos(handAngle) * 24;
         const handY = handPivotY + Math.sin(handAngle) * 24;
         p.item.draw(ctx, handX, handY, handAngle, p.facingRight);
@@ -1993,6 +2198,7 @@ function drawCharacterModel(p) {
     }
     ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center';
     let label = p.nameTag || 'P?'; if (p.id === localPlayerId) label += ' (YOU)';
+    if (p.eliminated) label += ' 💀';
     ctx.fillText(label, p.x + p.width / 2, p.y - 20);
     if (p.isGrounded && p.vy > 5 && !p.isDashing) spawnDustParticles(p.x, p.y + p.height);
 }
@@ -2096,7 +2302,7 @@ function enginePipelineTick(timestamp) {
 
     if (currentEngineMode === 'LOBBY' || currentEngineMode === 'GAME') {
         let localPlayer = players[localPlayerId];
-        if (localPlayer) {
+        if (localPlayer && !spectatorMode) {
             updateCharacterPhysics(localPlayer, dt);
             resolvePlayerCollisions();
             if (currentEngineMode === 'GAME' && isHost) checkAndProcessRaceFinish();
@@ -2157,10 +2363,25 @@ function enginePipelineTick(timestamp) {
             }
             wasDropPressed = keys.Drop;
             if (localPlayerItem) localPlayerItem.update(dt);
-            camera.zoom += (camera.targetZoom - camera.zoom) * 0.1 * dt;
-            let targetCamX = (localPlayer.x + localPlayer.width / 2) - (BASE_WIDTH / 2) / camera.zoom;
-            let targetCamY = (localPlayer.y + localPlayer.height / 2) - (BASE_HEIGHT / 2) / camera.zoom;
-            // Clamp to camera bounds (not full world)
+        } else if (localPlayer && spectatorMode) {
+            // Spectator: still need to update other players? Networking does that separately.
+            // Just update camera to follow target.
+            if (spectatorTargetId && players[spectatorTargetId]) {
+                updateCameraToTarget();
+            } else {
+                // Fallback: if target dead, pick another alive
+                const alive = getAlivePlayers();
+                if (alive.length > 0) {
+                    spectatorTargetId = alive[0].id;
+                    updateCameraToTarget();
+                }
+            }
+        }
+        camera.zoom += (camera.targetZoom - camera.zoom) * 0.1 * dt;
+        // Camera update for local player already handled in updateCameraToTarget for spectator
+        if (!spectatorMode && players[localPlayerId]) {
+            let targetCamX = (players[localPlayerId].x + players[localPlayerId].width / 2) - (BASE_WIDTH / 2) / camera.zoom;
+            let targetCamY = (players[localPlayerId].y + players[localPlayerId].height / 2) - (BASE_HEIGHT / 2) / camera.zoom;
             let maxX = cameraBounds.maxX - BASE_WIDTH / camera.zoom;
             let maxY = cameraBounds.maxY - BASE_HEIGHT / camera.zoom;
             let minX = cameraBounds.minX;
@@ -2169,8 +2390,6 @@ function enginePipelineTick(timestamp) {
             targetCamY = Math.max(minY, Math.min(targetCamY, maxY));
             camera.x += (targetCamX - camera.x) * 0.1 * dt;
             camera.y += (targetCamY - camera.y) * 0.1 * dt;
-        } else {
-            camera.zoom = 1; camera.x = camera.y = 0;
         }
 
         // bullets
@@ -2406,7 +2625,7 @@ function enginePipelineTick(timestamp) {
         updateAndRenderParticles();
         for (let id in players) {
             let p = players[id];
-            if (p.eliminated) continue;
+            if (p.eliminated && p.id !== localPlayerId) continue; // still draw eliminated local? we draw all for now
             if (p.isDashing) {
                 for (let i = 0; i < 2; i++) particles.push({
                     x: p.x + (p.facingRight ? 0 : p.width), y: p.y + Math.random() * p.height,
@@ -2414,11 +2633,26 @@ function enginePipelineTick(timestamp) {
                 });
             }
             drawCharacterModel(p);
-            if (id === localPlayerId) drawDashCooldownBar(p);
+            if (id === localPlayerId && !spectatorMode) drawDashCooldownBar(p);
         }
         drawSkinDoorUI(); drawStartDoorUI();
         ctx.restore();
         drawOffscreenRadarIndicators();
+
+        // Spectator HUD message
+        if (spectatorMode && currentEngineMode === 'GAME') {
+            ctx.font = 'bold 24px "Orbitron"';
+            ctx.fillStyle = '#ffcc00';
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = '#000';
+            ctx.textAlign = 'center';
+            ctx.fillText("👁️ SPECTATOR MODE", canvas.width / 2, 40);
+            ctx.font = '16px "Orbitron"';
+            ctx.fillStyle = '#fff';
+            ctx.fillText("Use ← → to switch players", canvas.width / 2, 80);
+            ctx.shadowBlur = 0;
+        }
+
         if (lobbyCountdownVal >= 0) {
             ctx.fillStyle = '#ff007f'; ctx.font = 'bold 36px "Orbitron"'; ctx.textAlign = 'center';
             ctx.shadowColor = '#ff007f'; ctx.shadowBlur = 15;
@@ -2449,6 +2683,17 @@ window.addEventListener('keydown', (e) => {
     if (['f', 'F'].includes(e.key)) keys.Interact = true;
     if (e.key === 'q' || e.key === 'Q') keys.Drop = true;
     if (e.code === 'ShiftLeft') keys.ShiftLeft = true;
+
+    // Spectator cycling with arrow keys (only when in spectator mode)
+    if (spectatorMode && currentEngineMode === 'GAME') {
+        if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            cycleSpectator(-1);
+        } else if (e.key === 'ArrowRight') {
+            e.preventDefault();
+            cycleSpectator(1);
+        }
+    }
 });
 
 window.addEventListener('keyup', (e) => {
@@ -2471,56 +2716,21 @@ window.addEventListener('wheel', (e) => {
 }, { passive: false });
 
 window.addEventListener('pointerdown', (e) => { if (e.button === 1) e.preventDefault(); });
+
+// Replace old mouse shoot/throw listeners with new functions
 canvas.addEventListener('mousedown', (e) => {
-    if (currentEngineMode !== 'LOBBY' && currentEngineMode !== 'GAME') return;
-    if (e.button !== 0) return;
-    if (!localPlayerItem) return;
-
-    if (localPlayerItem.name === 'pistol' && localPlayerItem.ammo !== undefined && localPlayerItem.ammo <= 0) {
-        if (emptyPistolSound) {
-            emptyPistolSound.currentTime = 0;
-            emptyPistolSound.play().catch(e => console.warn("Empty pistol sound play failed:", e));
-        }
-        return;
-    }
-
-    if (!localPlayerItem.canUse()) return;
-
-    if (isHost) {
-        const used = localPlayerItem.onUse(players[localPlayerId], { projectiles });
-        if (used) {
-            playPistolSound();
-            players[localPlayerId].ammo = localPlayerItem.ammo;
-            broadcastToRoom('sync_players', { allPlayers: players });
-        } else {
-            if (emptyPistolSound) {
-                emptyPistolSound.currentTime = 0;
-                emptyPistolSound.play().catch(e => console.warn("Empty pistol sound play failed:", e));
-            }
-        }
-    } else {
-        if (localPlayerItem.ammo !== undefined) {
-            localPlayerItem.ammo--;
-            players[localPlayerId].ammo = localPlayerItem.ammo;
-        }
-        const angle = calculateHandAngle(players[localPlayerId]);
-        hostConnection.send({
-            type: 'client_shoot',
-            senderId: localPlayerId,
-            payload: { handAngle: angle, ammo: localPlayerItem.ammo }
-        });
-        localPlayerItem.cooldown = localPlayerItem.cooldownMax;
-        playPistolSound();
+    if (spectatorMode) return;
+    if (e.button === 0) {
+        e.preventDefault();
+        performShoot();
     }
 });
-
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('mousedown', (e) => {
+    if (spectatorMode) return;
     if (e.button === 2 && players[localPlayerId] && players[localPlayerId].item) {
         e.preventDefault();
-        const angle = calculateHandAngle(players[localPlayerId]);
-        if (!isHost && hostConnection?.open) hostConnection.send({ type: 'request_throw_item', senderId: localPlayerId, payload: { angle } });
-        else if (isHost) hostThrowItem(localPlayerId, angle);
+        performThrow();
     }
 });
 
@@ -2532,6 +2742,32 @@ function bindTouchBtn(id, action) {
     el.addEventListener('touchcancel', (e) => { e.preventDefault(); touchState[action] = false; });
 }
 bindTouchBtn('btn-left', 'left'); bindTouchBtn('btn-right', 'right'); bindTouchBtn('btn-jump', 'jump');
+
+// Mobile shoot/throw buttons
+document.addEventListener('DOMContentLoaded', () => {
+    const shootBtn = document.getElementById('btn-shoot');
+    const throwBtn = document.getElementById('btn-throw');
+    if (shootBtn) {
+        shootBtn.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (!spectatorMode) performShoot();
+        });
+        shootBtn.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            if (!spectatorMode) performShoot();
+        });
+    }
+    if (throwBtn) {
+        throwBtn.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (!spectatorMode) performThrow();
+        });
+        throwBtn.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            if (!spectatorMode) performThrow();
+        });
+    }
+});
 
 // ============================================================================
 //  SKIN MENU & COLOR SELECTION
@@ -2669,5 +2905,43 @@ window.resetFaceDrawing = resetFaceDrawing;
 window.saveFaceDrawing = saveFaceDrawing;
 window.openFaceDrawing = openFaceDrawing;
 window.closeFaceDrawing = closeFaceDrawing;
+
+// ------------------------------------------------------------------
+// DEBUG / CONSOLE COMMANDS
+// ------------------------------------------------------------------
+window.forceStartMatch = function () {
+    if (!isHost) {
+        console.warn("forceStartMatch: You are not the host.");
+        return;
+    }
+    if (currentEngineMode !== 'LOBBY') {
+        console.warn("forceStartMatch: Not in LOBBY mode.");
+        return;
+    }
+    console.log("Forcing match start (bypassing door & player count)...");
+    // Cancel any pending lobby countdown
+    if (lobbyTimerId) {
+        clearInterval(lobbyTimerId);
+        lobbyTimerId = null;
+    }
+    lobbyCountdownVal = -1;
+    broadcastToRoom('sync_lobby_countdown', { value: -1 });
+    // Force start the match
+    executeActiveMatchStart();
+    // Notify any connected clients (though there may be none)
+    broadcastToRoom('trigger_match_start');
+};
+
+window.forceHostResetLobby = function () {
+    if (!isHost) {
+        console.warn("forceHostResetLobby: You are not the host.");
+        return;
+    }
+    if (currentEngineMode !== 'LOBBY') {
+        console.warn("forceHostResetLobby: Not in LOBBY mode.");
+        return;
+    }
+    hostResetLobby();
+};
 
 enginePipelineTick();

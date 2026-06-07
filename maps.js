@@ -46,7 +46,6 @@ const MAPS = {
       { "x": 1600, "y": 1300, "itemType": "pistol", "ammo": 3, "initialDelay": 0, "shouldRespawn": true }
     ],
     "voidYThreshold": 2000
-
   },
   "match": {
     "platforms": [
@@ -130,17 +129,23 @@ const MAPS = {
     "spawnPoints": [
       {
         "id": 1,
-        "x": 63.43718187338533,
-        "y": 377.8970997575648
+        "x": 63,
+        "y": 290
       }
     ],
+    "cameraBounds": {
+      "minX": 0,
+      "minY": 0,
+      "maxX": 3840,
+      "maxY": 2160
+    },
     "finishLine": {
       "x": 1730,
       "y": 140,
       "w": 70,
       "h": 80,
       "color": "#00ff66"
-    }
+    },
   }
 };
 window.MAPS = MAPS;
