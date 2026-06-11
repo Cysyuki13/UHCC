@@ -61,7 +61,7 @@ function performShoot() {
     if (!localPlayerItem) return;
     if (players[localPlayerId]?.eliminated) return;
 
-    // 🔥 NEW: Prevent using robot hand again if an active grab already exists
+    // Prevent using robot hand again if an active grab already exists
     if (localPlayerItem.name === 'robot_hand' && activeRobotHands.some(g => g.holderId === localPlayerId)) {
         console.warn("[RobotHand] Already have an active grab, cannot shoot again.");
         return;
@@ -78,6 +78,26 @@ function performShoot() {
 
     if (!localPlayerItem.canUse()) return;
 
+    // --- CLIENT-SIDE ANGLE VALIDATION FOR ROBOT HAND ---
+    // (Host already does this, but clients must also check to avoid visual desync)
+    if (!isHost && localPlayerItem.name === 'robot_hand') {
+        const angle = calculateHandAngle(players[localPlayerId]);
+        const facingAngle = players[localPlayerId].facingRight ? 0 : Math.PI;
+        let diff = angle - facingAngle;
+        while (diff > Math.PI) diff -= 2 * Math.PI;
+        while (diff < -Math.PI) diff += 2 * Math.PI;
+        const MAX_ANGLE_OFFSET = (60 * Math.PI) / 180; // 60 degrees
+        if (Math.abs(diff) > MAX_ANGLE_OFFSET) {
+            console.warn(`[RobotHand] Client blocked shoot: angle ${angle.toFixed(2)} out of range.`);
+            // Play the same sound as host does for a blocked shot
+            if (emptyPistolSound) {
+                emptyPistolSound.currentTime = 0;
+                emptyPistolSound.play().catch(e => console.warn("Wrong direction sound play failed:", e));
+            }
+            return; // Do not send request, do not consume item
+        }
+    }
+
     if (isHost) {
         // Host: the item's onUse method will remove the robot hand automatically
         const gameState = {
@@ -86,14 +106,22 @@ function performShoot() {
             mouseWorld: getMouseWorldPos()
         };
         const used = localPlayerItem.onUse(players[localPlayerId], gameState);
+
         if (used) {
             playPistolSound();
-            // For pistol, update ammo; for robot hand, ammo will be 0/undefined
-            players[localPlayerId].ammo = localPlayerItem.ammo;
-            // Robot hand is already removed inside onUse, so we sync that change
+
+            // FIX 1: Only update ammo if the item wasn't destroyed
+            if (players[localPlayerId].item) {
+                players[localPlayerId].ammo = players[localPlayerId].item.ammo;
+            }
+
             broadcastToRoom('sync_players', { allPlayers: players });
-            // 🔥 CRITICAL: Clear local reference to the item
-            localPlayerItem = null;
+
+            // FIX 2: Only clear the local item reference if the item was actually consumed (e.g., Robot Hand)
+            if (!players[localPlayerId].item) {
+                localPlayerItem = null;
+            }
+
         } else if (emptyPistolSound) {
             emptyPistolSound.currentTime = 0;
             emptyPistolSound.play().catch(e => console.warn("Empty pistol sound play failed:", e));
@@ -104,7 +132,6 @@ function performShoot() {
         const isPistol = (localPlayerItem.name === 'pistol');
 
         if (isPistol && localPlayerItem.ammo !== undefined) {
-            // Decrement pistol ammo locally
             localPlayerItem.ammo--;
             players[localPlayerId].ammo = localPlayerItem.ammo;
         } else if (isRobotHand) {
@@ -112,7 +139,7 @@ function performShoot() {
             players[localPlayerId].item = null;
             players[localPlayerId].itemType = null;
             players[localPlayerId].ammo = 0;
-            localPlayerItem = null; // Clear local reference
+            localPlayerItem = null;
         }
 
         const mouseWorld = getMouseWorldPos();
@@ -127,7 +154,6 @@ function performShoot() {
             }
         });
 
-        // Only apply cooldown if the item still exists (pistol case)
         if (localPlayerItem) {
             localPlayerItem.cooldown = localPlayerItem.cooldownMax;
         }
@@ -989,10 +1015,7 @@ function setupHostRoutingRules(conn) {
             case 'client_shoot':
                 if (players[pkg.senderId]) {
                     const player = players[pkg.senderId];
-                    if (pkg.payload.ammo !== undefined) {
-                        if (player.item) player.item.ammo = pkg.payload.ammo;
-                        player.ammo = pkg.payload.ammo;
-                    }
+                    // Do NOT set ammo from payload – host is authoritative.
                     if (player.item && player.item.canUse()) {
                         const gameState = {
                             projectiles,
