@@ -151,13 +151,15 @@
             <span id="countdown-sub" class="text-sm text-gray-400 mt-4 tracking-wider">Portal opening soon, prepare to
                 fight...</span>
         </div>
-
+        
         <div id="gameover-overlay"
             class="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-20 hidden">
             <div class="max-w-xs w-full bg-[#18082e] border-2 border-yellow-500 p-6 rounded-2xl text-center shadow-lg">
                 <span class="orbitron text-2xl font-black text-yellow-500 tracking-wider">ROUND OVER!</span>
                 <div id="match-result" class="text-md font-bold text-white my-4">Match ended!</div>
-                <button onclick="backToInteractiveLobby()"
+                <div id="waiting-for-host" class="text-gray-400 text-sm mb-3 hidden">Waiting for host to return to
+                    lobby...</div>
+                <button id="back-to-lobby-btn" onclick="backToInteractiveLobby()"
                     class="w-full py-3 bg-gradient-to-r from-cyan-500 to-blue-500 text-black font-black text-md orbitron rounded-xl hover:brightness-110 transition">
                     🔄 BACK TO LOBBY
                 </button>

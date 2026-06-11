@@ -309,6 +309,16 @@
                         style="width:90px;"></label>
                 <button id="setVoidFromViewBtn">📸 From bottom of view</button>
             </div>
+            <div class="section">
+                <strong>🏆 Scoreboard Position</strong>
+                <div class="flex-row" style="flex-wrap:wrap; gap:8px;">
+                    <label>X <input type="number" id="scoreX" step="10" value="50" style="width:70px;"></label>
+                    <label>Y <input type="number" id="scoreY" step="10" value="50" style="width:70px;"></label>
+                    <label>Width <input type="number" id="scoreW" step="10" value="250" style="width:80px;"></label>
+                    <label>Height <input type="number" id="scoreH" step="10" value="200" style="width:80px;"></label>
+                    <button id="resetScoreboardBtn">↺ Reset</button>
+                </div>
+            </div>
         </div>
 
         <div class="section">
@@ -445,7 +455,8 @@
             skinDoor: { x: 220, y: 390, w: 70, h: 110, color: '#ff007f' },
             lobbyDoor: { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' },
             finishLine: null,
-            cameraBounds: { ...DEFAULT_CAMERA_BOUNDS }
+            cameraBounds: { ...DEFAULT_CAMERA_BOUNDS },
+            scoreboard: { x: 50, y: 50, w: 250, h: 200 },
         };
 
         // Match data
@@ -503,6 +514,7 @@
             // Update currentCameraBounds and UI
             currentCameraBounds = getCurrentData().cameraBounds || { ...DEFAULT_CAMERA_BOUNDS };
             updateCameraBoundsUI();
+            if (currentMapType === "lobby") updateScoreboardUI();
             clearSelection();
             render();
         }
@@ -518,6 +530,7 @@
             else matchData = next;
             currentCameraBounds = getCurrentData().cameraBounds || { ...DEFAULT_CAMERA_BOUNDS };
             updateCameraBoundsUI();
+            if (currentMapType === "lobby") updateScoreboardUI();
             clearSelection();
             render();
         }
@@ -593,6 +606,45 @@
         document.getElementById('camMinY').addEventListener('change', applyCameraBoundsFromUI);
         document.getElementById('camMaxX').addEventListener('change', applyCameraBoundsFromUI);
         document.getElementById('camMaxY').addEventListener('change', applyCameraBoundsFromUI);
+
+        // ---------- SCOREBOARD UI ----------
+        function updateScoreboardUI() {
+            if (currentMapType !== "lobby") return;
+            const sb = lobbyData.scoreboard || { x: 50, y: 50, w: 250, h: 200 };
+            document.getElementById('scoreX').value = sb.x;
+            document.getElementById('scoreY').value = sb.y;
+            document.getElementById('scoreW').value = sb.w;
+            document.getElementById('scoreH').value = sb.h;
+        }
+
+        document.getElementById('scoreX').addEventListener('change', () => {
+            if (currentMapType !== "lobby") return;
+            lobbyData.scoreboard.x = parseInt(document.getElementById('scoreX').value) || 50;
+            saveState();
+        });
+        document.getElementById('scoreY').addEventListener('change', () => {
+            if (currentMapType !== "lobby") return;
+            lobbyData.scoreboard.y = parseInt(document.getElementById('scoreY').value) || 50;
+            saveState();
+        });
+        document.getElementById('scoreW').addEventListener('change', () => {
+            if (currentMapType !== "lobby") return;
+            lobbyData.scoreboard.w = parseInt(document.getElementById('scoreW').value) || 250;
+            saveState();
+        });
+        document.getElementById('scoreH').addEventListener('change', () => {
+            if (currentMapType !== "lobby") return;
+            lobbyData.scoreboard.h = parseInt(document.getElementById('scoreH').value) || 200;
+            saveState();
+        });
+        document.getElementById('resetScoreboardBtn').onclick = () => {
+            if (currentMapType !== "lobby") return;
+            lobbyData.scoreboard = { x: 50, y: 50, w: 250, h: 200 };
+            updateScoreboardUI();
+            saveState();
+        };
+
+        // ---------- END SCOREBOARD UI ----------
 
         function applyManualMove() {
             if (!selectedObj) return;
@@ -748,6 +800,7 @@
                 newData.skinDoor = jsonObj.doors.skinDoor ? { ...jsonObj.doors.skinDoor, color: '#ff007f' } : null;
                 newData.lobbyDoor = jsonObj.doors.lobbyDoor ? { ...jsonObj.doors.lobbyDoor, color: '#ffcc00' } : null;
                 newData.finishLine = null;
+                newData.scoreboard = jsonObj.scoreboard || { x: 50, y: 50, w: 250, h: 200 };
             } else {
                 newData.finishLine = jsonObj.finishLine ? { ...jsonObj.finishLine, color: '#00ff66' } : null;
                 newData.skinDoor = null;
@@ -760,7 +813,9 @@
             const current = getCurrentData();
             Object.keys(current).forEach(key => delete current[key]);
             Object.assign(current, newData);
-            // Update current camera bounds and UI
+            if (currentMapType === "lobby") {
+                updateScoreboardUI();
+            }
             if (newData.cameraBounds) {
                 currentCameraBounds = newData.cameraBounds;
                 updateCameraBoundsUI();
@@ -1108,19 +1163,17 @@
             ctx.scale(zoom, zoom);
             ctx.translate(-viewX, -viewY);
             ctx.fillStyle = "#FFD966";
-            ctx.shadowBlur = 0;
-            ctx.beginPath();
-            ctx.arc(s.x, s.y, 10, 0, Math.PI * 2);
-            ctx.fill();
+            ctx.fillRect(s.x - 10, s.y - 10, 20, 20);
+            ctx.strokeStyle = "#000";
+            ctx.lineWidth = 1 / zoom;
+            ctx.strokeRect(s.x - 10, s.y - 10, 20, 20);
             ctx.fillStyle = "#000";
-            ctx.font = `bold ${12 / zoom}px monospace`;
+            ctx.font = `bold ${14 / zoom}px monospace`;
             ctx.fillText("⭐", s.x - 6, s.y + 5);
             if (selectedObj && selectedObj.ref === s) {
                 ctx.strokeStyle = "#ffcc00";
                 ctx.lineWidth = 3 / zoom;
-                ctx.beginPath();
-                ctx.arc(s.x, s.y, 14, 0, Math.PI * 2);
-                ctx.stroke();
+                ctx.strokeRect(s.x - 12, s.y - 12, 24, 24);
             }
             ctx.restore();
         }
@@ -1148,9 +1201,7 @@
             });
             data.spawnPoints.forEach(s => {
                 minimapCtx.fillStyle = "#FFD966";
-                minimapCtx.beginPath();
-                minimapCtx.arc(s.x * scaleX, s.y * scaleY, 3, 0, Math.PI * 2);
-                minimapCtx.fill();
+                minimapCtx.fillRect(s.x * scaleX - 3, s.y * scaleY - 3, 6, 6);
             });
             if (currentMapType === "lobby") {
                 if (data.skinDoor) {
@@ -1311,6 +1362,7 @@
             clearSelection();
             currentCameraBounds = lobbyData.cameraBounds || { ...DEFAULT_CAMERA_BOUNDS };
             updateCameraBoundsUI();
+            updateScoreboardUI();
             render();
         };
         document.getElementById('tabMatchBtn').onclick = () => {
@@ -1338,6 +1390,7 @@
                     skinDoor: data.skinDoor || { x: 220, y: 390, w: 70, h: 110, color: '#ff007f' },
                     lobbyDoor: data.lobbyDoor || { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' }
                 };
+                base.scoreboard = data.scoreboard || { x: 50, y: 50, w: 250, h: 200 };
             } else {
                 base.finishLine = data.finishLine;
             }
@@ -1382,6 +1435,7 @@
                         skinDoor: lobby.skinDoor || { x: 220, y: 390, w: 70, h: 110, color: '#ff007f' },
                         lobbyDoor: lobby.lobbyDoor || { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' }
                     },
+                    scoreboard: lobby.scoreboard || { x: 50, y: 50, w: 250, h: 200 },
                     cameraBounds: lobby.cameraBounds || { ...DEFAULT_CAMERA_BOUNDS }
                 },
                 match: {
@@ -1454,6 +1508,7 @@
         // Initialize camera bounds UI from lobby data
         currentCameraBounds = lobbyData.cameraBounds;
         updateCameraBoundsUI();
+        updateScoreboardUI();
     </script>
 </body>
 

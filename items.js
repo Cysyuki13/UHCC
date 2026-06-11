@@ -4,11 +4,10 @@
 // Base Item Class (the "usable" item held by a player)
 // ------------------------------------------------------------------
 class UsableItem {
-    // Changed: cooldownSeconds instead of cooldownFrames
     constructor(name, svgPath, cooldownSeconds = 0.75) {
         this.name = name;
         this.svgPath = svgPath;
-        this.cooldown = 0;           // seconds remaining
+        this.cooldown = 0;
         this.cooldownMax = cooldownSeconds;
         this.image = null;
         this.loaded = false;
@@ -24,14 +23,11 @@ class UsableItem {
     draw(ctx, x, y, angle, facingRight = true) {
         ctx.save();
         ctx.translate(x, y);
-
         if (!facingRight) {
             ctx.scale(1, -1);
             angle = -angle;
         }
-
         ctx.rotate(angle);
-
         if (this.loaded && this.image) {
             const w = 24, h = 24;
             ctx.drawImage(this.image, -w / 2, -h / 2, w, h);
@@ -48,7 +44,6 @@ class UsableItem {
         ctx.restore();
     }
 
-    // Changed: now accepts dt (delta time in seconds)
     update(dt) {
         if (this.cooldown > 0) {
             this.cooldown -= dt;
@@ -72,7 +67,6 @@ class UsableItem {
 // ------------------------------------------------------------------
 class pistolItem extends UsableItem {
     constructor(ammo = 3) {
-        // 0.75 second cooldown (was 45 frames at 60fps ≈ 0.75s )
         super('pistol', 'assets/items/pistol.svg', 0.75);
         this.projectileSpeed = window.PISTOL_PROJECTILE_SPEED || 36;
         this.projectileRadius = 6;
@@ -94,8 +88,7 @@ class pistolItem extends UsableItem {
         const spawnY = handY + dirY * 20;
 
         const projectile = {
-            x: spawnX,
-            y: spawnY,
+            x: spawnX, y: spawnY,
             vx: dirX * this.projectileSpeed,
             vy: dirY * this.projectileSpeed,
             radius: this.projectileRadius,
@@ -110,6 +103,97 @@ class pistolItem extends UsableItem {
     }
 }
 
+// ===========================================================================
+// ROBOT HAND ITEM – grappling hook
+// ===========================================================================
+class RobotHandItem extends UsableItem {
+    constructor() {
+        super('robot_hand', 'assets/items/robot_hand.svg', 2.0);
+        this.projectileSpeed = 28;
+        this.projectileRadius = 10;
+        this.range = 400;
+        this.retractSpeed = 240;
+
+        // Load the three parts with meaningful names
+        this.handBaseImg = new Image();
+        this.handBaseImg.src = 'assets/items/robot_hand_base.svg';
+
+        this.stretchArmImg = new Image();
+        this.stretchArmImg.src = 'assets/items/robot_hand_arm.svg';
+
+        this.clawImg = new Image();
+        this.clawImg.src = 'assets/items/robot_hand_claw.svg';
+    }
+
+    // items.js - inside RobotHandItem class
+    onUse(player, gameState) {
+        if (!super.onUse(player, gameState)) return false;
+
+        // Determine target angle (mouse or default)
+        let angle;
+        let usingMouse = false;
+        if (gameState.mouseWorld) {
+            const handX = player.x + player.width / 2;
+            const handY = player.y + 32;
+            angle = Math.atan2(gameState.mouseWorld.y - handY, gameState.mouseWorld.x - handX);
+            usingMouse = true;
+            console.log(`[RobotHand] Used with mouse angle: ${angle.toFixed(2)} rad`);
+        } else {
+            angle = player.facingRight ? 0 : Math.PI;
+            console.log(`[RobotHand] Used with default angle: ${angle.toFixed(2)} rad`);
+        }
+
+        // --- ANGLE RESTRICTION ---
+        // Max allowed angle offset from player's facing direction (in radians)
+        const MAX_ANGLE_OFFSET = (60 * Math.PI) / 180;  // 60 degrees total? Actually 60° = 1.047 rad. Adjust as needed.
+        const facingAngle = player.facingRight ? 0 : Math.PI;
+        let diff = angle - facingAngle;
+        // Normalize to [-PI, PI]
+        while (diff > Math.PI) diff -= 2 * Math.PI;
+        while (diff < -Math.PI) diff += 2 * Math.PI;
+
+        if (Math.abs(diff) > MAX_ANGLE_OFFSET) {
+            console.warn(`[RobotHand] Aiming angle ${angle.toFixed(2)} is outside allowed range. Facing: ${facingAngle}, diff: ${diff.toFixed(2)}. Shoot blocked.`);
+            return false;   // Do not fire the robot hand
+        }
+        // --- END OF ANGLE RESTRICTION ---
+
+        // Instead of creating a projectile, create a "stretched hand" object
+        activeRobotHands.push({
+            holderId: player.id,
+            angle: angle,
+            progress: 0,
+            direction: 1,
+            targetReached: false,
+        });
+        console.log(`[RobotHand] Created activeRobotHands entry for player ${player.id}. Total active: ${activeRobotHands.length}`);
+
+        // Remove item (single use)
+        player.item = null;
+        player.itemType = null;
+        player.ammo = 0;
+        console.log(`[RobotHand] Item removed from player ${player.id}`);
+        return true;
+    }
+
+    draw(ctx, x, y, angle, facingRight = true) {
+        ctx.save();
+        ctx.translate(x, y);
+        if (!facingRight) {
+            ctx.scale(1, -1);
+            angle = -angle;
+        }
+        ctx.rotate(angle);
+        if (this.loaded && this.image) {
+            ctx.drawImage(this.image, -16, -16, 32, 32);
+        } else {
+            ctx.fillStyle = '#aa66ff';
+            ctx.fillRect(-12, -12, 24, 24);
+        }
+        ctx.restore();
+    }
+}
+
 // ------------------------------------------------------------------
 // WorldItem – item entity lying on the ground
 // ------------------------------------------------------------------
@@ -117,8 +201,8 @@ class WorldItem {
     constructor(x, y, itemType, initialDelay = 0, shouldRespawn = true, ammo = 3) {
         this.x = x;
         this.y = y;
-        this.w = 24;
-        this.h = 24;
+        this.w = 36;
+        this.h = 36;
         this.itemType = itemType;
         this.respawnTimer = 0;
         this.pickupDelayTimer = initialDelay;
@@ -135,6 +219,7 @@ class WorldItem {
         }
         switch (this.itemType) {
             case 'pistol': return new pistolItem(this.ammo);
+            case 'robot_hand': return new RobotHandItem();
             default: return null;
         }
     }
@@ -226,6 +311,7 @@ class ItemManager {
             let tempItem;
             switch (itemType) {
                 case 'pistol': tempItem = new pistolItem(); break;
+                case 'robot_hand': tempItem = new RobotHandItem(); break;
                 default: return null;
             }
             if (tempItem.image && tempItem.image.src) {
@@ -285,8 +371,8 @@ class ItemManager {
     }
 }
 
-// Expose globally
 window.UsableItem = UsableItem;
 window.pistolItem = pistolItem;
+window.RobotHandItem = RobotHandItem;
 window.WorldItem = WorldItem;
-window.ItemManager = ItemManager;   
+window.ItemManager = ItemManager;

@@ -60,6 +60,14 @@ function switchPanel(panelId) {
 function performShoot() {
     if (!localPlayerItem) return;
     if (players[localPlayerId]?.eliminated) return;
+
+    // 🔥 NEW: Prevent using robot hand again if an active grab already exists
+    if (localPlayerItem.name === 'robot_hand' && activeRobotHands.some(g => g.holderId === localPlayerId)) {
+        console.warn("[RobotHand] Already have an active grab, cannot shoot again.");
+        return;
+    }
+
+    // Pistol: check ammo
     if (localPlayerItem.name === 'pistol' && localPlayerItem.ammo !== undefined && localPlayerItem.ammo <= 0) {
         if (emptyPistolSound) {
             emptyPistolSound.currentTime = 0;
@@ -67,29 +75,62 @@ function performShoot() {
         }
         return;
     }
+
     if (!localPlayerItem.canUse()) return;
+
     if (isHost) {
-        const used = localPlayerItem.onUse(players[localPlayerId], { projectiles });
+        // Host: the item's onUse method will remove the robot hand automatically
+        const gameState = {
+            projectiles,
+            activeRobotHands,
+            mouseWorld: getMouseWorldPos()
+        };
+        const used = localPlayerItem.onUse(players[localPlayerId], gameState);
         if (used) {
             playPistolSound();
+            // For pistol, update ammo; for robot hand, ammo will be 0/undefined
             players[localPlayerId].ammo = localPlayerItem.ammo;
+            // Robot hand is already removed inside onUse, so we sync that change
             broadcastToRoom('sync_players', { allPlayers: players });
+            // 🔥 CRITICAL: Clear local reference to the item
+            localPlayerItem = null;
         } else if (emptyPistolSound) {
             emptyPistolSound.currentTime = 0;
             emptyPistolSound.play().catch(e => console.warn("Empty pistol sound play failed:", e));
         }
     } else {
-        if (localPlayerItem.ammo !== undefined) {
+        // --- Client prediction branch ---
+        const isRobotHand = (localPlayerItem.name === 'robot_hand');
+        const isPistol = (localPlayerItem.name === 'pistol');
+
+        if (isPistol && localPlayerItem.ammo !== undefined) {
+            // Decrement pistol ammo locally
             localPlayerItem.ammo--;
             players[localPlayerId].ammo = localPlayerItem.ammo;
+        } else if (isRobotHand) {
+            // Single-use: remove robot hand immediately after firing
+            players[localPlayerId].item = null;
+            players[localPlayerId].itemType = null;
+            players[localPlayerId].ammo = 0;
+            localPlayerItem = null; // Clear local reference
         }
+
+        const mouseWorld = getMouseWorldPos();
         const angle = calculateHandAngle(players[localPlayerId]);
         hostConnection.send({
             type: 'client_shoot',
             senderId: localPlayerId,
-            payload: { handAngle: angle, ammo: localPlayerItem.ammo }
+            payload: {
+                handAngle: angle,
+                ammo: isRobotHand ? 0 : (localPlayerItem?.ammo ?? 0),
+                mouseWorld: { x: mouseWorld.x, y: mouseWorld.y }
+            }
         });
-        localPlayerItem.cooldown = localPlayerItem.cooldownMax;
+
+        // Only apply cooldown if the item still exists (pistol case)
+        if (localPlayerItem) {
+            localPlayerItem.cooldown = localPlayerItem.cooldownMax;
+        }
         playPistolSound();
     }
 }
@@ -112,6 +153,8 @@ function performThrow() {
 let itemManager = null;
 let localPlayerItem = null;
 let projectiles = [];
+let activeRobotHands = [];      // Robot hand grab data
+let lastRobotHandSnapshot = null;
 const THROWABLE_GRAVITY = 0.35;
 
 const canvas = document.getElementById('gameCanvas');
@@ -151,6 +194,7 @@ let gameTimer = null;
 
 let lobbyCountdownVal = -1;
 let lobbyTimerId = null;
+let isReturningToLobby = false;
 
 let raceStarted = false;
 let firstPlayerFinishTime = -1;
@@ -178,8 +222,47 @@ let spectatorMode = false;
 let spectatorTargetId = null;
 let spectatorCycleButtonsAdded = false;
 
+// Match ending flag to prevent duplicate endings
+let matchEndingInProgress = false;
+
 function getAlivePlayers() {
     return Object.values(players).filter(p => !p.eliminated);
+}
+
+// Helper to end match if no players left alive
+function checkAllPlayersEliminatedAndEndMatch() {
+    if (!isHost || currentEngineMode !== 'GAME') return false;
+    if (matchEndingInProgress) return false;
+
+    const alive = getAlivePlayers();
+    if (alive.length === 0) {
+        matchEndingInProgress = true;
+        console.log("[MATCH END] All players eliminated. Ending match.");
+
+        // Stop any running timers immediately
+        if (gameTimer) {
+            clearInterval(gameTimer);
+            gameTimer = null;
+        }
+        if (raceTimerId) {
+            clearInterval(raceTimerId);
+            raceTimerId = null;
+        }
+
+        // Build results with current scores
+        let results = [];
+        for (let id in players) {
+            results.push({
+                id,
+                nameTag: players[id].nameTag,
+                score: players[id].score
+            });
+        }
+        broadcastToRoom('match_over', { summary: results });
+        executeMatchEndingSequence(results);
+        return true;
+    }
+    return false;
 }
 
 function cycleSpectator(direction) {
@@ -212,9 +295,9 @@ function updateCameraToTarget() {
 
 function repositionAllPlayersToSpawnPoints() {
     if (spawnPoints.length === 0) return;
-    let idx = 0;
+    // Use the first spawn point for all players
+    const sp = spawnPoints[0];
     for (let id in players) {
-        const sp = spawnPoints[idx % spawnPoints.length];
         players[id].x = sp.x;
         players[id].y = sp.y;
         players[id].vx = 0;
@@ -225,8 +308,12 @@ function repositionAllPlayersToSpawnPoints() {
         players[id].dashTimer = 0;
         players[id].isDashing = false;
         players[id].dashPushedBy = null;
-        players[id].eliminated = false;    // <-- ADD THIS
-        idx++;
+        players[id].eliminated = false;
+        players[id].deathReason = null;
+        players[id].knockbackTimer = 0;
+        players[id].knockbackVx = 0;
+        players[id].knockbackVy = 0;
+        players[id].grabbedBy = null;
     }
 }
 
@@ -326,12 +413,20 @@ function releaseSlot(peerId) {
 // ============================================================================
 
 function setupLobbyEnvironment() {
-    if (!itemManager) itemManager = new ItemManager();   // <-- ADD THIS
+    if (!itemManager) itemManager = new ItemManager();
 
     const map = MAPS.lobby;
     platforms = map.platforms || [];
     hazards = map.hazards || [];
     gems = map.gems || [];
+
+    if (map.scoreboard) {
+        window.lobbyScoreboardPos = { x: map.scoreboard.x, y: map.scoreboard.y, w: map.scoreboard.w, h: map.scoreboard.h };
+    } else {
+        window.lobbyScoreboardPos = { x: 50, y: 50, w: 250, h: 200 };
+    }
+
+
     // Read spawn points from map
     spawnPoints = (map.spawnPoints || []).map(sp => ({ x: sp.x, y: sp.y }));
     if (spawnPoints.length === 0) {
@@ -394,8 +489,10 @@ function hostResetLobby() {
 
     projectiles = [];
     throwables = [];
+    activeRobotHands = [];
     lastThrowableSnapshot = null;
     lastProjectileSnapshot = null;
+    lastRobotHandSnapshot = null;
 
     setupLobbyEnvironment();
 
@@ -413,31 +510,6 @@ function hostResetLobby() {
     firstPlayerFinishTime = -1;
     finishPositions = [];
 
-    let idx = 0;
-    for (let id in players) {
-        const p = players[id];
-        const sp = spawnPoints[idx % spawnPoints.length];
-        p.x = sp.x;
-        p.y = sp.y;
-        p.vx = 0;
-        p.vy = 0;
-        p.isGrounded = true;
-        p.jumpsLeft = 2;
-        p.dashCooldown = 0;
-        p.dashTimer = 0;
-        p.isDashing = false;
-        p.dashPushedBy = null;
-        p.score = 0;
-        p.item = null;
-        p.itemType = null;
-        p.ammo = 0;
-        p.finished = false;
-        p.finishTime = -1;
-        p.handAngle = p.facingRight ? 0 : Math.PI;
-        p.eliminated = false;
-        idx++;
-    }
-
     readyPlayers = {};
     localPlayerItem = null;
     resetVersion++;
@@ -447,6 +519,7 @@ function hostResetLobby() {
     broadcastWorldItems();
     broadcastToRoom('sync_throwables', { throwables });
     broadcastProjectiles();
+    broadcastRobotHands();
     broadcastToRoom('sync_lobby_countdown', { value: -1 });
 
     playSound('door');
@@ -523,7 +596,12 @@ function createPlayerProfile(id, nameTag) {
         sizeMultiplier: 1,
         itemType: null, item: null,
         ammo: 0,
-        eliminated: false
+        eliminated: false,
+        deathReason: null,
+        knockbackTimer: 0,
+        knockbackVx: 0,
+        knockbackVy: 0,
+        grabbedBy: null
     };
 }
 
@@ -552,16 +630,31 @@ function voidRespawnLobby(player) {
     player.dashTimer = 0;
     player.isDashing = false;
     player.dashPushedBy = null;
+    player.knockbackTimer = 0;
+    player.knockbackVx = 0;
+    player.knockbackVy = 0;
     playSound('spike');
 }
 
-function voidEliminateGame(player) {
+function voidEliminateGame(player, reason) {
     if (player.eliminated) return;
     player.eliminated = true;
+    player.deathReason = reason || 'unknown';
     player.item = null;
     player.itemType = null;
     player.ammo = 0;
+    player.knockbackTimer = 0;
+    // Clear any active grab involving this player
+    if (isHost) {
+        activeRobotHands = activeRobotHands.filter(g => g.holderId !== player.id && g.targetId !== player.id);
+        for (let id in players) {
+            if (players[id].grabbedBy === player.id) players[id].grabbedBy = null;
+        }
+        broadcastRobotHands();
+    }
     playSound('spike');
+    console.log(`[ELIMINATED] ${player.id} (${player.nameTag}) eliminated. Reason: ${player.deathReason}. Remaining alive: ${getAlivePlayers().length}`);
+
     // If local player eliminated, enter spectator mode
     if (player.id === localPlayerId && currentEngineMode === 'GAME') {
         spectatorMode = true;
@@ -569,22 +662,12 @@ function voidEliminateGame(player) {
         if (alive.length > 0) {
             spectatorTargetId = alive[0].id;
             updateCameraToTarget();
-        } else {
-            // No one alive – match will end soon
         }
-        // Show spectator UI elements
         document.getElementById('spectator-controls')?.classList.remove('hidden');
     }
-    // Host: check if all players eliminated
+    // Host: check if all players eliminated (immediate match end)
     if (isHost && currentEngineMode === 'GAME') {
-        const alive = getAlivePlayers();
-        if (alive.length === 0) {
-            // End match with current scores
-            let results = [];
-            for (let id in players) results.push({ id, nameTag: players[id].nameTag, score: players[id].score });
-            broadcastToRoom('match_over', { summary: results });
-            executeMatchEndingSequence(results);
-        }
+        checkAllPlayersEliminatedAndEndMatch();
     }
 }
 
@@ -596,7 +679,7 @@ function checkVoidDeath() {
         if (p.eliminated) continue;
         if (p.y > voidYThreshold) {
             if (!isGame) voidRespawnLobby(p);
-            else voidEliminateGame(p);
+            else voidEliminateGame(p, 'fell into void');
         }
     }
 }
@@ -623,6 +706,15 @@ function broadcastThrowables() {
     if (snap === lastThrowableSnapshot) return;
     lastThrowableSnapshot = snap;
     broadcastToRoom('sync_throwables', { throwables });
+}
+
+function broadcastRobotHands() {
+    if (!isHost) return;
+    const snap = JSON.stringify(activeRobotHands);
+    if (snap === lastRobotHandSnapshot) return;
+    lastRobotHandSnapshot = snap;
+    console.log(`[RobotHand] Broadcasting activeRobotHands: ${activeRobotHands.length} entries`);
+    broadcastToRoom('sync_robot_hands', { activeRobotHands });
 }
 
 // ============================================================================
@@ -687,6 +779,23 @@ function hostDropItem(playerId) {
     if (playerId === localPlayerId) localPlayerItem = null;
     broadcastToRoom('sync_players', { allPlayers: players });
     playSound('gem');
+}
+
+function hostCheckHazardsForAllPlayers() {
+    if (!isHost || currentEngineMode !== 'GAME') return;
+    for (let id in players) {
+        const p = players[id];
+        if (p.eliminated) continue;
+        // Check hazards
+        for (let h of hazards) {
+            if (checkCollision(p, h)) {
+                voidEliminateGame(p, 'touched a hazard');
+                break;
+            }
+        }
+    }
+    // void is already handled by checkVoidDeath() but call it again for safety
+    checkVoidDeath();
 }
 
 function hostThrowItem(playerId, angle, power = 14) {
@@ -798,6 +907,7 @@ function setupHostRoutingRules(conn) {
             safePlayers[id] = { ...players[id] };
             delete safePlayers[id].item;
             safePlayers[id].eliminated = players[id].eliminated;
+            safePlayers[id].grabbedBy = players[id].grabbedBy;  // ✅ sync grabbed state
         }
         conn.send({
             type: 'init_welcome',
@@ -869,7 +979,7 @@ function setupHostRoutingRules(conn) {
                     const picked = itemManager.checkPickup(players[pkg.senderId]);
                     if (picked) {
                         players[pkg.senderId].item = picked;
-                        players[pkg.senderId].itemType = 'pistol';
+                        players[pkg.senderId].itemType = picked.name === 'pistol' ? 'pistol' : 'robot_hand';
                         players[pkg.senderId].ammo = picked.ammo;
                         broadcastToRoom('sync_players', { allPlayers: players });
                         broadcastWorldItems();
@@ -877,32 +987,24 @@ function setupHostRoutingRules(conn) {
                 }
                 break;
             case 'client_shoot':
-                if (players[pkg.senderId] && pkg.payload.handAngle !== undefined) {
+                if (players[pkg.senderId]) {
                     const player = players[pkg.senderId];
                     if (pkg.payload.ammo !== undefined) {
                         if (player.item) player.item.ammo = pkg.payload.ammo;
                         player.ammo = pkg.payload.ammo;
                     }
-                    const handX = player.x + player.width / 2;
-                    const handY = player.y + 32;
-                    const angle = pkg.payload.handAngle;
-                    const dirX = Math.cos(angle);
-                    const dirY = Math.sin(angle);
-                    const spawnX = handX + dirX * 20;
-                    const spawnY = handY + dirY * 20;
-                    const projectile = {
-                        x: spawnX, y: spawnY,
-                        vx: dirX * PISTOL_PROJECTILE_SPEED,
-                        vy: dirY * PISTOL_PROJECTILE_SPEED,
-                        radius: 6, life: 120,
-                        ownerId: pkg.senderId,
-                        type: 'pistol_ammo',
-                        knockback: 15
-                    };
-                    projectiles.push(projectile);
-                    broadcastProjectiles();
-                    playSound('door');
-                    broadcastToRoom('sync_players', { allPlayers: players });
+                    if (player.item && player.item.canUse()) {
+                        const gameState = {
+                            projectiles,
+                            activeRobotHands,
+                            mouseWorld: pkg.payload.mouseWorld || null
+                        };
+                        const used = player.item.onUse(player, gameState);
+                        if (used) {
+                            playSound('door');
+                            broadcastToRoom('sync_players', { allPlayers: players });
+                        }
+                    }
                 }
                 break;
             case 'request_drop_item':
@@ -943,7 +1045,11 @@ function initGuest() {
 function setupClientRoutingRules(conn) {
     conn.on('data', (pkg) => {
         switch (pkg.type) {
-            case 'room_full': alert("Room is full (max 6 players)!"); cancelConnection(); break;
+            case 'room_full':
+                alert("Room is full (max 6 players)!");
+                cancelConnection();
+                break;
+
             case 'init_welcome':
                 localPlayerId = pkg.payload.assignedId;
                 players = pkg.payload.allPlayers;
@@ -961,26 +1067,41 @@ function setupClientRoutingRules(conn) {
                         } else {
                             players[id].item.ammo = players[id].ammo;
                         }
+                    } else if (players[id].itemType === 'robot_hand') {
+                        if (!players[id].item || players[id].item.constructor !== RobotHandItem) {
+                            players[id].item = new RobotHandItem();
+                            players[id].item.ammo = players[id].ammo;
+                        } else {
+                            players[id].item.ammo = players[id].ammo;
+                        }
                     } else {
                         players[id].item = null;
                     }
                 }
-                if (players[localPlayerId] && players[localPlayerId].item) localPlayerItem = players[localPlayerId].item;
-                else localPlayerItem = null;
+                if (players[localPlayerId] && players[localPlayerId].item)
+                    localPlayerItem = players[localPlayerId].item;
+                else
+                    localPlayerItem = null;
                 break;
-            case 'sync_players':
+
+            case 'sync_players': {
                 const isReset = pkg.payload.reset === true;
                 const newVersion = pkg.payload.resetVersion;
                 if (newVersion !== undefined && newVersion !== clientResetVersion) {
                     clientResetVersion = newVersion;
                 }
+
+                // Update other players
                 for (let id in pkg.payload.allPlayers) {
                     const data = pkg.payload.allPlayers[id];
                     if (id !== localPlayerId) {
-                        if (!players[id]) players[id] = data;
-                        else {
-                            players[id].x = data.x; players[id].y = data.y;
-                            players[id].vx = data.vx; players[id].vy = data.vy;
+                        if (!players[id]) {
+                            players[id] = data;
+                        } else {
+                            players[id].x = data.x;
+                            players[id].y = data.y;
+                            players[id].vx = data.vx;
+                            players[id].vy = data.vy;
                             players[id].isGrounded = data.isGrounded;
                             players[id].facingRight = data.facingRight;
                             players[id].score = data.score;
@@ -992,12 +1113,16 @@ function setupClientRoutingRules(conn) {
                             players[id].itemType = data.itemType;
                             players[id].ammo = data.ammo;
                             players[id].eliminated = data.eliminated || false;
+                            players[id].deathReason = data.deathReason || null;
                         }
                     }
                 }
 
+                // Update local player
                 if (pkg.payload.allPlayers[localPlayerId]) {
                     const local = pkg.payload.allPlayers[localPlayerId];
+
+                    // --- FULL RESET (entire state overwritten) ---
                     if (isReset) {
                         players[localPlayerId].x = local.x;
                         players[localPlayerId].y = local.y;
@@ -1012,17 +1137,19 @@ function setupClientRoutingRules(conn) {
                         players[localPlayerId].finished = local.finished;
                         players[localPlayerId].finishTime = local.finishTime;
                         players[localPlayerId].eliminated = local.eliminated || false;
+                        players[localPlayerId].deathReason = local.deathReason || null;
+                        players[localPlayerId].grabbedBy = local.grabbedBy;
 
+                        // Reset input & spectator mode
                         keys.ArrowLeft = false;
                         keys.ArrowRight = false;
                         keys.ArrowUp = false;
 
-                        // Reset spectator mode
                         spectatorMode = false;
                         spectatorTargetId = null;
                         document.getElementById('spectator-controls')?.classList.add('hidden');
 
-                        // Clamp camera initial position to bounds
+                        // Reset camera
                         let initCamX = local.x - BASE_WIDTH / 2;
                         let initCamY = local.y - BASE_HEIGHT / 2;
                         let maxX = cameraBounds.maxX - BASE_WIDTH / camera.zoom;
@@ -1053,6 +1180,22 @@ function setupClientRoutingRules(conn) {
                             });
                         }
                     }
+
+                    // --- CRITICAL: If grabbed, always accept host position & physics ---
+                    if (local.grabbedBy) {
+                        players[localPlayerId].x = local.x;
+                        players[localPlayerId].y = local.y;
+                        players[localPlayerId].vx = local.vx;
+                        players[localPlayerId].vy = local.vy;
+                        players[localPlayerId].isGrounded = local.isGrounded;
+                        players[localPlayerId].facingRight = local.facingRight;
+                        players[localPlayerId].isDashing = local.isDashing;
+                        players[localPlayerId].handAngle = local.handAngle;
+                        players[localPlayerId].grabbedBy = local.grabbedBy;
+                    }
+
+                    // Update non‑positional attributes (always)
+                    players[localPlayerId].grabbedBy = local.grabbedBy;
                     players[localPlayerId].score = local.score;
                     players[localPlayerId].color = local.color;
                     players[localPlayerId].itemType = local.itemType;
@@ -1060,7 +1203,10 @@ function setupClientRoutingRules(conn) {
                     players[localPlayerId].finishTime = local.finishTime;
                     players[localPlayerId].ammo = local.ammo;
                     players[localPlayerId].eliminated = local.eliminated || false;
+                    players[localPlayerId].deathReason = local.deathReason || null;
                 }
+
+                // Reconstruct items for all players
                 for (let id in players) {
                     if (players[id].itemType === 'pistol') {
                         if (!players[id].item || players[id].item.constructor !== pistolItem) {
@@ -1072,16 +1218,41 @@ function setupClientRoutingRules(conn) {
                         if (data && data.itemCooldown !== undefined) {
                             players[id].item.cooldown = data.itemCooldown;
                         }
+                    } else if (players[id].itemType === 'robot_hand') {
+                        if (!players[id].item || players[id].item.constructor !== RobotHandItem) {
+                            players[id].item = new RobotHandItem();
+                            players[id].item.ammo = players[id].ammo;
+                        } else {
+                            players[id].item.ammo = players[id].ammo;
+                        }
+                        const data = pkg.payload.allPlayers[id];
+                        if (data && data.itemCooldown !== undefined) {
+                            players[id].item.cooldown = data.itemCooldown;
+                        }
                     } else {
                         players[id].item = null;
                     }
                 }
-                if (players[localPlayerId] && players[localPlayerId].item) localPlayerItem = players[localPlayerId].item;
-                else localPlayerItem = null;
+
+                if (players[localPlayerId] && players[localPlayerId].item)
+                    localPlayerItem = players[localPlayerId].item;
+                else
+                    localPlayerItem = null;
+
                 updateHudDisplays();
                 updateColorButtonStates();
                 break;
-            case 'sync_throwables': throwables = pkg.payload.throwables; break;
+            }
+
+            case 'sync_throwables':
+                throwables = pkg.payload.throwables;
+                break;
+
+            case 'sync_robot_hands':
+                activeRobotHands = pkg.payload.activeRobotHands;
+                console.log(`[RobotHand] Client received ${activeRobotHands.length} active hands`);
+                break;
+
             case 'sync_map':
                 platforms = pkg.payload.platforms;
                 hazards = pkg.payload.hazards;
@@ -1093,22 +1264,56 @@ function setupClientRoutingRules(conn) {
                     voidYThreshold = pkg.payload.voidYThreshold;
                 }
                 break;
-            case 'sync_lobby_countdown': lobbyCountdownVal = pkg.payload.value; break;
-            case 'sync_ready_players': readyPlayers = pkg.payload.readyPlayers; break;
+
+            case 'sync_lobby_countdown':
+                lobbyCountdownVal = pkg.payload.value;
+                break;
+
+            case 'sync_ready_players':
+                readyPlayers = pkg.payload.readyPlayers;
+                break;
+
             case 'sync_face_drawing':
                 localStorage.setItem('playerFaceDrawing_' + pkg.payload.playerId, pkg.payload.faceData);
                 localStorage.setItem('playerHasCustomFace_' + pkg.payload.playerId, 'true');
                 break;
-            case 'trigger_match_start': executeActiveMatchStart(); break;
-            case 'sync_timer': timerVal = pkg.payload.time; document.getElementById('timer').innerText = timerVal; break;
-            case 'match_over': executeMatchEndingSequence(pkg.payload.summary); break;
-            case 'return_to_lobby': executeLobbyReturnSequence(); break;
-            case 'sync_race_start': raceCountdownVal = pkg.payload.raceCountdownVal; firstPlayerFinishTime = Date.now(); break;
-            case 'sync_race_countdown': raceCountdownVal = pkg.payload.value; break;
-            case 'sync_world_items': if (itemManager) itemManager.syncFromData(pkg.payload.items); break;
-            case 'sync_projectiles': projectiles = pkg.payload.projectiles; break;
+
+            case 'trigger_match_start':
+                executeActiveMatchStart();
+                break;
+
+            case 'sync_timer':
+                timerVal = pkg.payload.time;
+                document.getElementById('timer').innerText = timerVal;
+                break;
+
+            case 'match_over':
+                executeMatchEndingSequence(pkg.payload.summary);
+                break;
+
+            case 'return_to_lobby':
+                executeLobbyReturnSequence();
+                break;
+
+            case 'sync_race_start':
+                raceCountdownVal = pkg.payload.raceCountdownVal;
+                firstPlayerFinishTime = Date.now();
+                break;
+
+            case 'sync_race_countdown':
+                raceCountdownVal = pkg.payload.value;
+                break;
+
+            case 'sync_world_items':
+                if (itemManager) itemManager.syncFromData(pkg.payload.items);
+                break;
+
+            case 'sync_projectiles':
+                projectiles = pkg.payload.projectiles;
+                break;
         }
     });
+
     conn.on('close', () => document.getElementById('disconnect-modal').classList.remove('hidden'));
 }
 
@@ -1132,6 +1337,8 @@ function broadcastToRoom(type, payload) {
                 safe[id].itemCooldown = payload.allPlayers[id].item.cooldown;
             }
             safe[id].eliminated = payload.allPlayers[id].eliminated;
+            safe[id].deathReason = payload.allPlayers[id].deathReason || null;
+            safe[id].grabbedBy = payload.allPlayers[id].grabbedBy || null;   // ✅ ADD THIS LINE
         }
         msgPayload = { allPlayers: safe, resetVersion: resetVersion };
         if (payload.reset === true) msgPayload.reset = true;
@@ -1268,16 +1475,18 @@ function executeActiveMatchStart() {
     raceCountdownVal = -1;
     finishPositions = [];
 
-    // Clear any leftover projectiles, throwables, particles
+    // Clear any leftover projectiles, throwables, particles, robot hands
     projectiles = [];
     throwables = [];
+    activeRobotHands = [];
     particles = [];
     lastThrowableSnapshot = null;
     lastProjectileSnapshot = null;
+    lastRobotHandSnapshot = null;
 
-    let idx = 0;
+    // Use the first spawn point for all players
+    const sp = spawnPoints[0];
     for (let id in players) {
-        const sp = spawnPoints[idx % spawnPoints.length];
         players[id].x = sp.x;
         players[id].y = sp.y;
         players[id].vx = 0;
@@ -1285,13 +1494,14 @@ function executeActiveMatchStart() {
         players[id].finished = false;
         players[id].finishTime = -1;
         players[id].eliminated = false;
-
-        // Reset player inventory (items picked up in lobby)
+        players[id].deathReason = null;
+        players[id].knockbackTimer = 0;
+        players[id].knockbackVx = 0;
+        players[id].knockbackVy = 0;
         players[id].item = null;
         players[id].itemType = null;
         players[id].ammo = 0;
-
-        idx++;
+        players[id].grabbedBy = null;
     }
 
     // Reset local player's item reference
@@ -1302,6 +1512,9 @@ function executeActiveMatchStart() {
     spectatorTargetId = null;
     document.getElementById('spectator-controls')?.classList.add('hidden');
 
+    // Reset match ending flag for new match
+    matchEndingInProgress = false;
+
     if (isHost) {
         timerVal = 60;
         if (gameTimer) clearInterval(gameTimer);
@@ -1309,19 +1522,32 @@ function executeActiveMatchStart() {
             timerVal--;
             broadcastToRoom('sync_timer', { time: timerVal });
             document.getElementById('timer').innerText = timerVal;
+
             if (timerVal <= 0) {
                 clearInterval(gameTimer);
-                if (raceCountdownVal !== -1) {
-                    if (raceTimerId) clearInterval(raceTimerId);
+                gameTimer = null;
+
+                if (raceTimerId) {
+                    clearInterval(raceTimerId);
                     raceTimerId = null;
-                    let results = [];
-                    for (let id in players) results.push({ id, nameTag: players[id].nameTag, score: players[id].score });
-                    broadcastToRoom('match_over', { summary: results });
-                    executeMatchEndingSequence(results);
                 }
+
+                // Gather final results safely even if nobody reached the finish line
+                let results = [];
+                for (let id in players) {
+                    results.push({ id, nameTag: players[id].nameTag, score: players[id].score });
+                }
+                broadcastToRoom('match_over', { summary: results });
+                executeMatchEndingSequence(results);
             }
         }, 1000);
     }
+
+    // Log available debug commands
+    console.log("%c[UHCC] Match started! Available debug commands:", "color: #00f2fe; font-weight: bold;");
+    console.log("  forceStartMatch()   - Force start match (host only)");
+    console.log("  forceHostResetLobby() - Reset lobby (host only)");
+    console.log("  status()            - Show player status (alive/dead, reason, score, position)");
 }
 
 function checkAndProcessRaceFinish() {
@@ -1360,6 +1586,8 @@ function checkAndProcessRaceFinish() {
     }
 }
 
+let lobbyReturnTimeout = null;
+
 function executeMatchEndingSequence(summary) {
     // Stop match timers
     if (gameTimer) {
@@ -1373,21 +1601,45 @@ function executeMatchEndingSequence(summary) {
 
     const overlay = document.getElementById('gameover-overlay');
     const resText = document.getElementById('match-result');
+    const waitingMsg = document.getElementById('waiting-for-host');
+    const backBtn = document.getElementById('back-to-lobby-btn');
+
     overlay.classList.remove('hidden');
+
+    // Sort and display results
     summary.sort((a, b) => b.score - a.score);
     let resultText = "🏁 MATCH OVER\n";
     resultText += summary.slice(0, 3).map((s, i) => `${['🥇', '🥈', '🥉'][i]} ${s.nameTag}: ${s.score} pts`).join('\n');
     resText.innerText = resultText;
-    if (isHost) setTimeout(() => backToInteractiveLobby(), 5000);
+
+    if (isHost) {
+        // Host shows the button, hides waiting message
+        waitingMsg.classList.add('hidden');
+        backBtn.classList.remove('hidden');
+        if (lobbyReturnTimeout) clearTimeout(lobbyReturnTimeout);
+        lobbyReturnTimeout = setTimeout(() => backToInteractiveLobby(), 5000);
+    } else {
+        // Client: hide the button, show waiting message
+        backBtn.classList.add('hidden');
+        waitingMsg.classList.remove('hidden');
+    }
 }
 
 function backToInteractiveLobby() {
     if (!isHost) return;
+    if (lobbyReturnTimeout) clearTimeout(lobbyReturnTimeout);
+    lobbyReturnTimeout = null;
     broadcastToRoom('return_to_lobby');
     executeLobbyReturnSequence();
 }
 
 function executeLobbyReturnSequence() {
+    // Prevent re‑entrancy
+    if (isReturningToLobby) return;
+    isReturningToLobby = true;
+
+    matchEndingInProgress = false;
+
     // Hide game over overlay
     document.getElementById('gameover-overlay').classList.add('hidden');
 
@@ -1412,10 +1664,15 @@ function executeLobbyReturnSequence() {
         players[id].eliminated = false;
         players[id].finished = false;
         players[id].finishTime = -1;
-        players[id].score = 0;           // optional – keep if you want persistent scores
+        players[id].score = 0;
         players[id].item = null;
         players[id].itemType = null;
         players[id].ammo = 0;
+        players[id].knockbackTimer = 0;
+        players[id].knockbackVx = 0;
+        players[id].knockbackVy = 0;
+        players[id].deathReason = null;
+        players[id].grabbedBy = null;
     }
 
     // Reset spectator mode
@@ -1429,10 +1686,12 @@ function executeLobbyReturnSequence() {
     if (isHost) {
         broadcastToRoom('sync_players', { allPlayers: players, reset: true });
         broadcastToRoom('sync_lobby_countdown', { value: -1 });
-        // Also reset throwables and projectiles on host side (they are cleared in enterLobbyState)
     }
 
     updateResetButtonVisibility();
+
+    // Release the lock after a short delay
+    setTimeout(() => { isReturningToLobby = false; }, 500);
 }
 
 // ============================================================================
@@ -1459,7 +1718,6 @@ function resolvePlayerCollisions() {
             if (p1.x < p2.x + p2.width && p1.x + p1.width > p2.x &&
                 p1.y < p2.y + p2.height && p1.y + p1.height > p2.y) {
 
-                // Log collision
                 const overlapLeft = p1.x + p1.width - p2.x;
                 const overlapRight = p2.x + p2.width - p1.x;
                 const overlapTop = p1.y + p1.height - p2.y;
@@ -1490,8 +1748,6 @@ function resolvePlayerCollisions() {
                 }
 
                 const sep = minOverlap / 2;
-                const oldX1 = p1.x, oldY1 = p1.y, oldX2 = p2.x, oldY2 = p2.y;
-
                 if (minOverlap === overlapLeft || minOverlap === overlapRight) {
                     if (minOverlap === overlapLeft) {
                         p1.x -= sep;
@@ -1511,7 +1767,6 @@ function resolvePlayerCollisions() {
                     if (p1.vy > 0 && p2.vy < 0) { p1.vy = 0; p2.vy = 0; }
                 }
 
-                // Log position changes
                 const MAX_PUSH = 18;
                 p1.vx = Math.min(MAX_PUSH, Math.max(-MAX_PUSH, p1.vx));
                 p2.vx = Math.min(MAX_PUSH, Math.max(-MAX_PUSH, p2.vx));
@@ -1520,128 +1775,193 @@ function resolvePlayerCollisions() {
     }
 }
 
+// ============================================================================
+//  KNOCKBACK PRIORITY (overrides movement, dash, jump)
+// ============================================================================
+
+function resolvePlatformCollision(player) {
+    for (let plat of platforms) {
+        if (player.x < plat.x + plat.w && player.x + player.width > plat.x &&
+            player.y < plat.y + plat.h && player.y + player.height > plat.y) {
+            // Vertical overlap handling (most common after grab)
+            const topOverlap = (player.y + player.height) - plat.y;
+            const bottomOverlap = (plat.y + plat.h) - player.y;
+            const leftOverlap = (player.x + player.width) - plat.x;
+            const rightOverlap = (plat.x + plat.w) - player.x;
+            const minOverlap = Math.min(topOverlap, bottomOverlap, leftOverlap, rightOverlap);
+
+            if (minOverlap === topOverlap && player.vy >= 0) {
+                // Land on top of platform
+                player.y = plat.y - player.height;
+                player.isGrounded = true;
+                player.vy = 0;
+            } else if (minOverlap === bottomOverlap && player.vy <= 0) {
+                player.y = plat.y + plat.h;
+                player.vy = 0;
+            } else if (minOverlap === leftOverlap) {
+                player.x = plat.x - player.width;
+            } else if (minOverlap === rightOverlap) {
+                player.x = plat.x + plat.w;
+            }
+        }
+    }
+    // Additional safety: if still overlapping, force a simple upward push
+    for (let plat of platforms) {
+        if (player.x < plat.x + plat.w && player.x + player.width > plat.x &&
+            player.y < plat.y + plat.h && player.y + player.height > plat.y) {
+            player.y = plat.y - player.height;
+            player.isGrounded = true;
+            player.vy = 0;
+        }
+    }
+}
+
 function updateCharacterPhysics(player, dt) {
     if (player.eliminated) return;
 
-    if (player.dashCooldown > 0) player.dashCooldown -= dt;
-    let left = keys.ArrowLeft || touchState.left;
-    let right = keys.ArrowRight || touchState.right;
-    let jump = keys.ArrowUp || touchState.jump;
-    let shift = keys.ShiftLeft;
-    let dashJustPressed = shift && !player.wasDashPressed;
-    player.wasDashPressed = shift;
-    if (dashJustPressed && player.dashCooldown <= 0 && !player.isDashing) {
-        player.isDashing = true;
-        player.dashTimer = 10;
-        player.dashCooldown = 90;
+    // If grabbed by robot hand, host controls everything – freeze completely
+    if (player.grabbedBy) {
+        player.vx = 0;
+        player.vy = 0;
+        return;
     }
 
-    let dashMovementApplied = false;
-    if (player.isDashing) {
-        player.vx = player.facingRight ? DASH_SPEED : -DASH_SPEED;
-        const totalMove = player.vx * dt;
-        const stepSize = 3;
-        let moved = 0;
+    const isGrabbed = false; // keep for compatibility
 
-        while (Math.abs(moved) < Math.abs(totalMove)) {
-            let remaining = Math.abs(totalMove) - Math.abs(moved);
-            let step = Math.min(stepSize, remaining);
-            let stepX = (totalMove > 0 ? step : -step);
-            let newX = player.x + stepX;
+    // --- KNOCKBACK TAKES PRIORITY ---
+    let isKnockedBack = false;
+    if (player.knockbackTimer > 0) {
+        player.knockbackTimer -= dt;
+        player.vx = player.knockbackVx;
+        player.vy = player.knockbackVy;
+        player.knockbackVx *= 0.95;
+        player.knockbackVy *= 0.95;
+        if (player.knockbackTimer <= 0) {
+            player.knockbackTimer = 0;
+            player.knockbackVx = 0;
+            player.knockbackVy = 0;
+        }
+        isKnockedBack = true;
+    }
 
-            let tempPlayer = {
-                x: newX,
-                y: player.y,
-                width: player.width,
-                height: player.height
-            };
+    // --- Input / Dash / Jump ---
+    if (!isKnockedBack) {
+        if (player.dashCooldown > 0) player.dashCooldown -= dt;
 
-            let collision = false;
+        let left = keys.ArrowLeft || touchState.left;
+        let right = keys.ArrowRight || touchState.right;
+        let jump = keys.ArrowUp || touchState.jump;
+        let shift = keys.ShiftLeft;
+        let dashJustPressed = shift && !player.wasDashPressed;
+        player.wasDashPressed = shift;
 
-            for (let id in players) {
-                if (id === player.id) continue;
-                let other = players[id];
-                if (checkCollision(tempPlayer, other)) {
-                    collision = true;
-                    break;
-                }
-            }
+        if (dashJustPressed && player.dashCooldown <= 0 && !player.isDashing) {
+            player.isDashing = true;
+            player.dashTimer = 10;
+            player.dashCooldown = 90;
+        }
 
-            if (!collision) {
-                for (let plat of platforms) {
-                    if (checkCollision(tempPlayer, plat)) {
+        let dashMovementApplied = false;
+        if (player.isDashing) {
+            player.vx = player.facingRight ? DASH_SPEED : -DASH_SPEED;
+            const totalMove = player.vx * dt;
+            const stepSize = 3;
+            let moved = 0;
+
+            while (Math.abs(moved) < Math.abs(totalMove)) {
+                let remaining = Math.abs(totalMove) - Math.abs(moved);
+                let step = Math.min(stepSize, remaining);
+                let stepX = (totalMove > 0 ? step : -step);
+                let newX = player.x + stepX;
+
+                let tempPlayer = {
+                    x: newX,
+                    y: player.y,
+                    width: player.width,
+                    height: player.height
+                };
+
+                let collision = false;
+                for (let id in players) {
+                    if (id === player.id) continue;
+                    let other = players[id];
+                    if (checkCollision(tempPlayer, other)) {
                         collision = true;
                         break;
                     }
                 }
+                if (!collision) {
+                    for (let plat of platforms) {
+                        if (checkCollision(tempPlayer, plat)) {
+                            collision = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (collision) {
+                    player.isDashing = false;
+                    player.dashTimer = 0;
+                    player.vx = 0;
+                    dashMovementApplied = true;
+                    break;
+                } else {
+                    player.x = newX;
+                    moved += stepX;
+                    dashMovementApplied = true;
+                }
             }
 
-            if (collision) {
+            player.dashTimer -= dt;
+            if (player.dashTimer <= 0 && player.isDashing) {
                 player.isDashing = false;
-                player.dashTimer = 0;
-                player.vx = 0;
-                dashMovementApplied = true;
-                break;
-            } else {
-                player.x = newX;
-                moved += stepX;
-                dashMovementApplied = true;
+                player.vx *= 0.4;
+                player.dashPushedBy = null;
             }
         }
 
-        player.dashTimer -= dt;
-        if (player.dashTimer <= 0 && player.isDashing) {
-            player.isDashing = false;
-            player.vx *= 0.4;
-            player.dashPushedBy = null;
+        if (!player.isDashing && !dashMovementApplied) {
+            if (left) {
+                player.vx = -MOVE_SPEED;
+                player.facingRight = false;
+            } else if (right) {
+                player.vx = MOVE_SPEED;
+                player.facingRight = true;
+            } else {
+                player.vx *= Math.pow(FRICTION, dt);
+                if (Math.abs(player.vx) < 0.1) player.vx = 0;
+            }
+            player.x += player.vx * dt;
+        }
+
+        // Jump
+        let dynGravity = GRAVITY;
+        if (jump && player.vy < 0) dynGravity = GRAVITY * 0.4;
+        player.vy += dynGravity * dt;
+        if (player.vy > MAX_FALL_SPEED) player.vy = MAX_FALL_SPEED;
+        if (player.isGrounded) player.jumpsLeft = 2;
+        let jumpJustPressed = jump && !player.wasJumpPressed;
+        player.wasJumpPressed = jump;
+        if (jumpJustPressed) {
+            if (player.isGrounded) {
+                player.vy = -6;
+                player.isGrounded = false;
+                player.jumpsLeft = 1;
+                playSound('jump');
+                spawnJumpParticles(player.x + player.width / 2, player.y + player.height, true);
+            } else if (player.jumpsLeft > 0) {
+                player.vy = -6;
+                player.jumpsLeft = 0;
+                playSound('jump');
+                spawnJumpParticles(player.x + player.width / 2, player.y + player.height, false);
+            }
         }
     }
 
-    if (!player.isDashing && !dashMovementApplied) {
-        if (left) {
-            player.vx = -MOVE_SPEED;
-            player.facingRight = false;
-        } else if (right) {
-            player.vx = MOVE_SPEED;
-            player.facingRight = true;
-        } else {
-            player.vx *= Math.pow(FRICTION, dt);
-            if (Math.abs(player.vx) < 0.1) player.vx = 0;
-        }
-        const oldX = player.x;
-        player.x += player.vx * dt;
-        if (Math.abs(oldX - player.x) > 10) {
-            console.warn(`[LARGE MOVE] ${player.id} moved ${(player.x - oldX).toFixed(2)} in one step!`);
-        }
-    }
-
-    let dynGravity = GRAVITY;
-    if (jump && player.vy < 0) dynGravity = GRAVITY * 0.4;
-    player.vy += dynGravity * dt;
-    if (player.vy > MAX_FALL_SPEED) player.vy = MAX_FALL_SPEED;
-    if (player.isGrounded) player.jumpsLeft = 2;
-    let jumpJustPressed = jump && !player.wasJumpPressed;
-    player.wasJumpPressed = jump;
-    if (jumpJustPressed) {
-        if (player.isGrounded) {
-            player.vy = -6;
-            player.isGrounded = false;
-            player.jumpsLeft = 1;
-            playSound('jump');
-            spawnJumpParticles(player.x + player.width / 2, player.y + player.height, true);
-        } else if (player.jumpsLeft > 0) {
-            player.vy = -6;
-            player.jumpsLeft = 0;
-            playSound('jump');
-            spawnJumpParticles(player.x + player.width / 2, player.y + player.height, false);
-        }
-    }
-
-    // Horizontal platform collision (sides) – snap when moving into wall, regardless of jump state
+    // --- Platform collisions (horizontal sides) ---
     platforms.forEach(plat => {
         if (checkCollision(player, plat)) {
             const verticalOverlap = (player.y + player.height > plat.y && player.y < plat.y + plat.h);
-            // Only snap if vertically overlapping and moving horizontally
             if (verticalOverlap && player.vx !== 0) {
                 const oldX = player.x;
                 let newX = player.x;
@@ -1650,35 +1970,25 @@ function updateCharacterPhysics(player, dt) {
                 } else if (player.vx < 0) {
                     newX = plat.x + plat.w;
                 }
-                // Limit snap distance to max 30px to prevent teleportation
                 if (Math.abs(newX - oldX) <= 30) {
                     player.x = newX;
-                    if (Math.abs(oldX - player.x) > 10) {
-                        console.warn(`[PLATFORM SNAP] ${player.id} moved ${(player.x - oldX).toFixed(2)}px`);
-                    }
                     player.vx = 0;
                     if (player.isDashing) player.isDashing = false;
-                } else {
-                    console.warn(`[PLATFORM SNAP BLOCKED] ${player.id} would move ${(newX - oldX).toFixed(2)}px - ignoring`);
                 }
             }
         }
     });
 
-    // Vertical movement and landing
+    // --- Vertical movement and landing ---
     player.y += player.vy * dt;
     let landed = false;
     platforms.forEach(plat => {
         if (checkCollision(player, plat)) {
-            // Only handle landing if the player is falling and the collision is from above
             if (player.vy > 0) {
-                // Check if the player's bottom is very close to the platform's top
                 const bottomDiff = (player.y + player.height) - plat.y;
                 if (bottomDiff >= 0 && bottomDiff <= 10) {
-                    // Also require at least 30% horizontal overlap to avoid thin walls causing landing
                     const horizontalOverlap = Math.min(player.x + player.width - plat.x, plat.x + plat.w - player.x);
                     if (horizontalOverlap > player.width * 0.3) {
-                        const oldY = player.y;
                         player.y = plat.y - player.height;
                         player.isGrounded = true;
                         landed = true;
@@ -1686,10 +1996,8 @@ function updateCharacterPhysics(player, dt) {
                     }
                 }
             } else if (player.vy < 0) {
-                // Head hit – player hits bottom of a platform while rising
                 const topDiff = plat.y + plat.h - player.y;
                 if (topDiff >= 0 && topDiff <= 10) {
-                    const oldY = player.y;
                     player.y = plat.y + plat.h;
                     player.vy = 0;
                 }
@@ -1698,27 +2006,32 @@ function updateCharacterPhysics(player, dt) {
     });
 
     // WORLD BOUNDARIES
-    if (player.x < 0) {
-        console.warn(`[BOUNDARY] ${player.id} hit left wall, was ${player.x}, set to 0`);
-        player.x = 0;
-    }
-    if (player.x + player.width > WORLD_WIDTH) {
-        console.warn(`[BOUNDARY] ${player.id} hit right wall, was ${player.x}, set to ${WORLD_WIDTH - player.width}`);
-        player.x = WORLD_WIDTH - player.width;
+    if (player.x < 0) player.x = 0;
+    if (player.x + player.width > WORLD_WIDTH) player.x = WORLD_WIDTH - player.width;
+
+    // VOID CHECK
+    const BOTTOM_DEATH_Y = 2200;
+    if (player.y > BOTTOM_DEATH_Y) {
+        if (currentEngineMode === 'GAME') {
+            if (!player.eliminated) voidEliminateGame(player, 'fell into void');
+            player.vx = 0;
+            player.vy = 0;
+        } else {
+            voidRespawnLobby(player);
+        }
+        return;
     }
 
+    // HAZARDS
     hazards.forEach(h => {
         if (checkCollision(player, h)) {
-            console.warn(`[HAZARD] ${player.id} hit hazard at (${h.x},${h.y})`);
             player.isDashing = false;
-            if (currentEngineMode === 'GAME') {
-                voidEliminateGame(player);
-            } else {
-                respawnMatchEntity(player);
-            }
+            if (currentEngineMode === 'GAME') voidEliminateGame(player, 'touched a hazard');
+            else respawnMatchEntity(player);
         }
     });
 
+    // GEMS
     gems.forEach(g => {
         if (!g.collected && checkCircleCollision(player, g)) {
             if (isHost) processGemCapture(g.id, player.id);
@@ -1726,12 +2039,12 @@ function updateCharacterPhysics(player, dt) {
         }
     });
 
+    // PLAYER-ON-PLAYER LANDING
     for (let otherId in players) {
         if (otherId === player.id) continue;
         let target = players[otherId];
         if (player.vy > 0 && player.x + player.width > target.x && player.x < target.x + target.width &&
             player.y + player.height <= target.y + 5 && player.y + player.height + player.vy * dt >= target.y) {
-            const oldY = player.y;
             player.y = target.y - player.height;
             player.vy = 0;
             player.isGrounded = true;
@@ -1759,7 +2072,6 @@ function processGemCapture(gemId, targetId) {
 }
 
 function respawnMatchEntity(player) {
-    console.warn(`[RESPAWN MATCH] ${player.id} respawning from (${player.x},${player.y})`);
     if (spawnPoints.length === 0) {
         player.x = 100;
         player.y = 200;
@@ -1774,6 +2086,9 @@ function respawnMatchEntity(player) {
     player.vx = 0;
     player.vy = 0;
     player.score = Math.max(0, player.score - 5);
+    player.knockbackTimer = 0;
+    player.knockbackVx = 0;
+    player.knockbackVy = 0;
     playSound('spike');
     if (isHost) {
         broadcastToRoom('sync_players', { allPlayers: players });
@@ -1914,20 +2229,44 @@ function drawParticles() {
 }
 
 function drawLobbyScoreboard() {
-    const x = 50, y = 50, w = 250, h = 200;
-    ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = '#00f2fe'; ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
-    ctx.fillStyle = '#00f2fe'; ctx.font = 'bold 14px "Orbitron"'; ctx.textAlign = 'left'; ctx.fillText('📊 Scoreboard', x + 10, y + 25);
+    // Use canvas pixel coordinates (0-1280, 0-720)
+    const pos = window.lobbyScoreboardPos || { x: 50, y: 50, w: 250, h: 200 };
+    let x = pos.x, y = pos.y, w = pos.w, h = pos.h;
+
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#00f2fe';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = '#00f2fe';
+    ctx.font = 'bold 14px "Orbitron"';
+    ctx.textAlign = 'left';
+    ctx.fillText('📊 Scoreboard', x + 10, y + 25);
+
     const sorted = Object.values(players).sort((a, b) => b.score - a.score);
     ctx.font = '12px "Orbitron"';
     sorted.slice(0, 5).forEach((pl, idx) => {
         const yy = y + 45 + idx * 30;
-        ctx.fillStyle = pl.color; ctx.beginPath(); ctx.arc(x + 15, yy, 4, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#ffffff'; ctx.fillText(`${pl.nameTag}:`, x + 30, yy + 4);
-        ctx.fillStyle = '#ffff00'; ctx.textAlign = 'right'; ctx.fillText(`${pl.score} pt`, x + w - 15, yy + 4);
+        ctx.fillStyle = pl.color;
+        ctx.beginPath();
+        ctx.arc(x + 15, yy, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(`${pl.nameTag}:`, x + 30, yy + 4);
+        ctx.fillStyle = '#ffff00';
+        ctx.textAlign = 'right';
+        ctx.fillText(`${pl.score} pt`, x + w - 15, yy + 4);
         ctx.textAlign = 'left';
     });
 }
+
+// Robot hand stretched parts (global, used in drawCanvasLevelLayout)
+let robotHandBaseImg = new Image();
+robotHandBaseImg.src = 'assets/items/robot_hand_base.svg';
+let robotHandArmImg = new Image();
+robotHandArmImg.src = 'assets/items/robot_hand_arm.svg';
+let robotHandClawImg = new Image();
+robotHandClawImg.src = 'assets/items/robot_hand_claw.svg';
 
 function drawCanvasLevelLayout() {
     platforms.forEach(plat => {
@@ -2062,8 +2401,58 @@ function drawCanvasLevelLayout() {
         }
     }
 
-    if (currentEngineMode === 'LOBBY') {
-        drawLobbyScoreboard();
+    // Draw active robot hands using SVG parts (BASE PART REMOVED)
+    for (let grab of activeRobotHands) {
+        const holder = players[grab.holderId];
+        if (!holder) continue;
+
+        const startX = holder.x + holder.width * 0.5;
+        const startY = holder.y + 32;
+        const endX = grab.headX || (startX + Math.cos(grab.angle) * 400 * (grab.progress ?? 0));
+        const endY = grab.headY || (startY + Math.sin(grab.angle) * 400 * (grab.progress ?? 0));
+        const angle = Math.atan2(endY - startY, endX - startX);
+        const length = Math.hypot(endX - startX, endY - startY);
+
+        ctx.save();
+
+        // Part 2: stretchable arm (scaled horizontally to length)
+        if (robotHandArmImg.complete && robotHandArmImg.naturalWidth > 0 && length > 0) {
+            ctx.save();
+            ctx.translate(startX, startY);
+            ctx.rotate(angle);
+            const imgW = robotHandArmImg.width;
+            const imgH = robotHandArmImg.height / 10;
+            const scaleX = length / imgW;
+            ctx.scale(scaleX, 1);
+            ctx.drawImage(robotHandArmImg, 0, -imgH / 2, imgW, imgH);
+            ctx.restore();
+        }
+
+        // Part 3: claw at the tip
+        if (robotHandClawImg.complete && robotHandClawImg.naturalWidth > 0) {
+            ctx.save();
+            ctx.translate(endX, endY);
+            ctx.rotate(angle - 90 * Math.PI / 180);
+            ctx.drawImage(robotHandClawImg, -38, -16, 64, 32);
+            ctx.restore();
+        } else {
+            // fallback (if image missing)
+            ctx.fillStyle = '#ff66cc';
+            ctx.beginPath();
+            ctx.arc(endX, endY, 12, 0, Math.PI * 2);
+            ctx.fill();
+            for (let ang = 0; ang < Math.PI * 2; ang += Math.PI / 4) {
+                const spikeX = endX + Math.cos(ang) * 16;
+                const spikeY = endY + Math.sin(ang) * 16;
+                ctx.beginPath();
+                ctx.moveTo(endX, endY);
+                ctx.lineTo(spikeX, spikeY);
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = '#ffffff';
+                ctx.stroke();
+            }
+        }
+        ctx.restore();
     }
 }
 
@@ -2183,10 +2572,12 @@ function drawCharacterModel(p) {
     ctx.fillStyle = p.color; roundedRect(ctx, 0, -3, 18, 6, 3); ctx.fill(); ctx.stroke();
     ctx.beginPath(); ctx.arc(24, 0, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     ctx.restore();
+
     if (p.item && !p.eliminated) {
-        const handX = handPivotX + Math.cos(handAngle) * 24;
-        const handY = handPivotY + Math.sin(handAngle) * 24;
+        const handX = handPivotX + Math.cos(handAngle) * 33;
+        const handY = handPivotY + Math.sin(handAngle) * 33;
         p.item.draw(ctx, handX, handY, handAngle, p.facingRight);
+
         if (p.id === localPlayerId && p.itemType === 'pistol' && p.item.ammo !== undefined) {
             ctx.font = 'bold 14px "Orbitron"';
             ctx.fillStyle = '#fff';
@@ -2196,6 +2587,7 @@ function drawCharacterModel(p) {
             ctx.fillText(`${p.item.ammo}`, handX, handY - 8);
         }
     }
+
     ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center';
     let label = p.nameTag || 'P?'; if (p.id === localPlayerId) label += ' (YOU)';
     if (p.eliminated) label += ' 💀';
@@ -2206,7 +2598,8 @@ function drawCharacterModel(p) {
 function updateAndRenderParticles() {
     for (let i = particles.length - 1; i >= 0; i--) {
         let p = particles[i];
-        p.x += p.vx; p.y += p.vy;
+        p.x += p.vx;
+        p.y += p.vy;
         p.alpha -= 0.04;
         if (p.alpha <= 0) { particles.splice(i, 1); continue; }
         ctx.save(); ctx.globalAlpha = p.alpha; ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, p.size, p.size); ctx.restore();
@@ -2302,6 +2695,17 @@ function enginePipelineTick(timestamp) {
 
     if (currentEngineMode === 'LOBBY' || currentEngineMode === 'GAME') {
         let localPlayer = players[localPlayerId];
+
+        // --- CRITICAL: Death checks MUST run for ALL players every frame, regardless of spectator status ---
+        if (isHost && currentEngineMode === 'GAME') {
+            hostCheckHazardsForAllPlayers();
+        }
+        checkVoidDeath();
+        // After death checks, evaluate match end
+        if (isHost && currentEngineMode === 'GAME') {
+            checkAllPlayersEliminatedAndEndMatch();
+        }
+
         if (localPlayer && !spectatorMode) {
             updateCharacterPhysics(localPlayer, dt);
             resolvePlayerCollisions();
@@ -2311,17 +2715,19 @@ function enginePipelineTick(timestamp) {
                 localPlayer.handAngle = calculateHandAngle(localPlayer);
                 broadcastToRoom('sync_players', { allPlayers: players });
             } else {
-                hostConnection.send({
-                    type: 'client_input_update', senderId: localPlayerId,
-                    payload: {
-                        x: localPlayer.x, y: localPlayer.y, vx: localPlayer.vx, vy: localPlayer.vy,
-                        isGrounded: localPlayer.isGrounded, facingRight: localPlayer.facingRight,
-                        isDashing: localPlayer.isDashing, handAngle: calculateHandAngle(localPlayer),
-                        resetVersion: clientResetVersion
-                    }
-                });
+                // Do NOT send input updates if the local player is grabbed – host controls position
+                if (!localPlayer.grabbedBy) {
+                    hostConnection.send({
+                        type: 'client_input_update', senderId: localPlayerId,
+                        payload: {
+                            x: localPlayer.x, y: localPlayer.y, vx: localPlayer.vx, vy: localPlayer.vy,
+                            isGrounded: localPlayer.isGrounded, facingRight: localPlayer.facingRight,
+                            isDashing: localPlayer.isDashing, handAngle: calculateHandAngle(localPlayer),
+                            resetVersion: clientResetVersion
+                        }
+                    });
+                }
             }
-            checkVoidDeath();
 
             if (itemManager) {
                 itemManager.update();
@@ -2329,7 +2735,7 @@ function enginePipelineTick(timestamp) {
                     const picked = itemManager.checkPickup(localPlayer);
                     if (picked) {
                         players[localPlayerId].item = picked;
-                        players[localPlayerId].itemType = 'pistol';
+                        players[localPlayerId].itemType = picked.name === 'pistol' ? 'pistol' : 'robot_hand';
                         players[localPlayerId].ammo = picked.ammo;
                         localPlayerItem = picked;
                         broadcastToRoom('sync_players', { allPlayers: players });
@@ -2364,12 +2770,9 @@ function enginePipelineTick(timestamp) {
             wasDropPressed = keys.Drop;
             if (localPlayerItem) localPlayerItem.update(dt);
         } else if (localPlayer && spectatorMode) {
-            // Spectator: still need to update other players? Networking does that separately.
-            // Just update camera to follow target.
             if (spectatorTargetId && players[spectatorTargetId]) {
                 updateCameraToTarget();
             } else {
-                // Fallback: if target dead, pick another alive
                 const alive = getAlivePlayers();
                 if (alive.length > 0) {
                     spectatorTargetId = alive[0].id;
@@ -2378,7 +2781,6 @@ function enginePipelineTick(timestamp) {
             }
         }
         camera.zoom += (camera.targetZoom - camera.zoom) * 0.1 * dt;
-        // Camera update for local player already handled in updateCameraToTarget for spectator
         if (!spectatorMode && players[localPlayerId]) {
             let targetCamX = (players[localPlayerId].x + players[localPlayerId].width / 2) - (BASE_WIDTH / 2) / camera.zoom;
             let targetCamY = (players[localPlayerId].y + players[localPlayerId].height / 2) - (BASE_HEIGHT / 2) / camera.zoom;
@@ -2392,47 +2794,232 @@ function enginePipelineTick(timestamp) {
             camera.y += (targetCamY - camera.y) * 0.1 * dt;
         }
 
-        // bullets
+        // bullets (projectile hit logic with knockback)
         for (let i = 0; i < projectiles.length; i++) {
             const p = projectiles[i];
-            p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
-            if (p.life <= 0) { projectiles.splice(i, 1); i--; continue; }
-            // Use WORLD boundaries for removal (full world)
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.life -= dt;
+            if (p.life <= 0) {
+                projectiles.splice(i, 1);
+                i--;
+                continue;
+            }
             const out = p.x + p.radius < 0 || p.x - p.radius > WORLD_WIDTH ||
                 p.y + p.radius < 0 || p.y - p.radius > WORLD_HEIGHT;
             if (out) {
                 for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 });
-                projectiles.splice(i, 1); i--; continue;
+                projectiles.splice(i, 1);
+                i--;
+                continue;
             }
             let solid = false;
             for (let plat of platforms) if (p.x + p.radius > plat.x && p.x - p.radius < plat.x + plat.w && p.y + p.radius > plat.y && p.y - p.radius < plat.y + plat.h) { solid = true; break; }
-            if (solid) { for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 }); projectiles.splice(i, 1); i--; continue; }
+            if (solid) {
+                for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 });
+                projectiles.splice(i, 1);
+                i--;
+                continue;
+            }
             for (let h of hazards) if (p.x + p.radius > h.x && p.x - p.radius < h.x + h.w && p.y + p.radius > h.y && p.y - p.radius < h.y + h.h) { solid = true; break; }
-            if (solid) { for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 }); projectiles.splice(i, 1); i--; continue; }
+            if (solid) {
+                for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 });
+                projectiles.splice(i, 1);
+                i--;
+                continue;
+            }
             for (let id in players) {
                 if (id === p.ownerId) continue;
                 const t = players[id];
                 if (t.eliminated) continue;
-                const dx = p.x - (t.x + t.width / 2), dy = p.y - (t.y + t.height / 2);
+
+                // Normal knockback projectile
+                const dx = p.x - (t.x + t.width / 2);
+                const dy = p.y - (t.y + t.height / 2);
                 if (Math.hypot(dx, dy) < p.radius + t.width / 2) {
                     const angle = Math.atan2(p.vy, p.vx);
-                    t.vx += Math.cos(angle) * p.knockback;
-                    t.vy += Math.sin(angle) * p.knockback;
-                    projectiles.splice(i, 1); i--; playSound('spike'); break;
+                    // Apply knockback with priority
+                    t.knockbackTimer = 0.25;
+                    t.knockbackVx = Math.cos(angle) * p.knockback;
+                    t.knockbackVy = Math.sin(angle) * p.knockback;
+                    projectiles.splice(i, 1);
+                    i--;
+                    playSound('spike');
+                    break;
                 }
             }
         }
 
-        // throwables
+        // Robot hand stretch/retract updates (host only)
+        if (isHost && (currentEngineMode === 'GAME' || currentEngineMode === 'LOBBY')) {
+            for (let i = 0; i < activeRobotHands.length; i++) {
+                const grab = activeRobotHands[i];
+                const holder = players[grab.holderId];
+
+                // Remove if holder missing or eliminated
+                if (!holder || holder.eliminated) {
+                    if (grab.targetId && players[grab.targetId]) {
+                        players[grab.targetId].grabbedBy = null;
+                        broadcastToRoom('sync_players', { allPlayers: players });
+                    }
+                    activeRobotHands.splice(i, 1);
+                    console.log(`[RobotHand] Removed grab because holder invalid. Remaining: ${activeRobotHands.length}`);
+                    i--;
+                    continue;
+                }
+
+                // STUCK DETECTION: if progress hasn't changed in 2 seconds, force remove
+                const now = Date.now();
+                if (!grab._lastProgressTime) {
+                    grab._lastProgressTime = now;
+                    grab._lastProgress = grab.progress;
+                } else if (now - grab._lastProgressTime > 2000 && Math.abs(grab.progress - grab._lastProgress) < 0.01) {
+                    console.warn(`[RobotHand] Grab stuck for >2s, force removing. Holder: ${grab.holderId}, progress: ${grab.progress}`);
+                    if (grab.targetId && players[grab.targetId]) {
+                        players[grab.targetId].grabbedBy = null;
+                    }
+                    activeRobotHands.splice(i, 1);
+                    i--;
+                    continue;
+                } else {
+                    // Update tracking every 0.5s to avoid spam
+                    if (now - grab._lastProgressTime > 500) {
+                        grab._lastProgressTime = now;
+                        grab._lastProgress = grab.progress;
+                    }
+                }
+
+                const MAX_LENGTH = 400;
+                const EXTEND_SPEED = 20; // 20 (tesing with 5)
+                const RETRACT_SPEED = EXTEND_SPEED + 10;
+
+                const handX = holder.x + holder.width / 2;
+                const handY = holder.y + 32;
+
+                // --- Extending phase ---
+                if (grab.direction === 1) {
+                    const oldProgress = grab.progress;
+                    grab.progress += (EXTEND_SPEED * dt) / MAX_LENGTH;
+                    console.log(`[RobotHand] Extending: progress=${grab.progress.toFixed(3)}, angle=${grab.angle.toFixed(2)}`);
+
+                    if (grab.progress >= 1) {
+                        grab.progress = 1;
+                        grab.direction = -1;
+                        console.log(`[RobotHand] Reached max length, now retracting (no target)`);
+                    } else {
+                        // Check collision at the tip
+                        const tipX = handX + Math.cos(grab.angle) * MAX_LENGTH * grab.progress;
+                        const tipY = handY + Math.sin(grab.angle) * MAX_LENGTH * grab.progress;
+                        for (let id in players) {
+                            if (id === grab.holderId) continue;
+                            const target = players[id];
+                            if (target.eliminated) continue;
+                            const targetCenterX = target.x + target.width / 2;
+                            const targetCenterY = target.y + target.height / 2;
+                            const dx = tipX - targetCenterX;
+                            const dy = tipY - targetCenterY;
+                            const dist = Math.hypot(dx, dy);
+                            if (dist < 25 + target.width / 2) {
+                                grab.targetId = id;
+                                grab.direction = -1;
+                                target.grabbedBy = grab.holderId;
+
+                                // Apply upward offset when first grabbed
+                                const grabOffsetY = -3;
+                                target.x = tipX - target.width / 2;
+                                target.y = tipY - target.height / 2 + grabOffsetY;
+
+                                target.vx = 0;
+                                target.vy = 0;
+                                target.isGrounded = false;
+
+                                // --- NEW: Immediately resolve platform collision on grab ---
+                                resolvePlatformCollision(target);
+
+                                console.log(`[RobotHand] HIT ${target.nameTag} (${id})...`);
+                                playSound('door');
+                                broadcastToRoom('sync_players', { allPlayers: players });
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // --- Retracting phase ---
+                if (grab.direction === -1) {
+                    const oldProgress = grab.progress;
+                    grab.progress -= (RETRACT_SPEED * dt) / MAX_LENGTH;
+
+                    if (grab.progress <= 0) {
+                        // RELEASE TARGET
+                        if (grab.targetId && players[grab.targetId]) {
+                            const target = players[grab.targetId];
+                            const angleToHolder = Math.atan2(handY - target.y, handX - target.x);
+                            target.vx += Math.cos(angleToHolder) * 20;
+                            target.vy += Math.sin(angleToHolder) * 20;
+                            target.grabbedBy = null;
+                            target.isGrounded = false;
+                            // --- NEW: Resolve platform collision so they don't fall through ---
+                            resolvePlatformCollision(target);
+                            broadcastToRoom('sync_players', { allPlayers: players });
+                        }
+                        activeRobotHands.splice(i, 1);
+                        continue;
+                    }
+
+                    if (grab.targetId && players[grab.targetId]) {
+                        const target = players[grab.targetId];
+                        const pulled = (oldProgress - grab.progress) * MAX_LENGTH;
+                        const angle = Math.atan2(handY - target.y, handX - target.x);
+
+                        let newX = target.x + Math.cos(angle) * pulled;
+                        let newY = target.y + Math.sin(angle) * pulled;
+
+                        // Apply upward offset while being pulled
+                        const grabOffsetY = -5;
+                        newY += grabOffsetY;
+
+                        // Clamp to world boundaries
+                        newX = Math.max(0, Math.min(WORLD_WIDTH - target.width, newX));
+                        newY = Math.max(0, Math.min(WORLD_HEIGHT - target.height, newY));
+
+                        target.x = newX;
+                        target.y = newY;
+                        target.vx = 0;
+                        target.vy = 0;
+                        target.isGrounded = false;
+
+                        // --- NEW: Avoid pushing target into platforms during grab ---
+                        resolvePlatformCollision(target);
+                        // Ensure target stays above any platform after adjustment
+                        for (let plat of platforms) {
+                            if (target.x < plat.x + plat.w && target.x + target.width > plat.x &&
+                                target.y + target.height > plat.y && target.y < plat.y + plat.h) {
+                                if (target.vy <= 0 && target.y + target.height - plat.y < 15) {
+                                    target.y = plat.y - target.height;
+                                    target.isGrounded = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Update stored head position for drawing
+                const tipX = handX + Math.cos(grab.angle) * MAX_LENGTH * grab.progress;
+                const tipY = handY + Math.sin(grab.angle) * MAX_LENGTH * grab.progress;
+                grab.headX = tipX;
+                grab.headY = tipY;
+            }
+            broadcastRobotHands();
+        }
+
+        // throwables (player hit logic with knockback)
         for (let i = 0; i < throwables.length; i++) {
             const t = throwables[i];
 
-            // Apply gravity and air resistance
             t.vy += THROWABLE_GRAVITY * dt;
             t.angularSpeed *= 0.996;
-
-            // Step movement in smaller increments to prevent tunneling
-            const maxStep = 8; // maximum pixels per step
+            const maxStep = 8;
             let remainingX = t.vx * dt;
             let remainingY = t.vy * dt;
             let steps = Math.max(1, Math.ceil(Math.abs(remainingX) / maxStep), Math.ceil(Math.abs(remainingY) / maxStep));
@@ -2442,15 +3029,11 @@ function enginePipelineTick(timestamp) {
             for (let step = 0; step < steps; step++) {
                 t.x += stepX;
                 t.y += stepY;
-
-                // Life decreases with time, not per step
                 t.life -= dt / steps;
                 t.angle += t.angularSpeed * dt / steps;
-
-                // Early break if life expired
                 if (t.life <= 0) break;
 
-                // --- World boundaries (with offset) ---
+                // world boundaries bounce (no bottom bounce)
                 let bounced = false;
                 if (t.x - t.radius < 0 && t.x + t.radius > -BREAK_BOUNDS_OFFSET) {
                     t.x = t.radius;
@@ -2470,19 +3053,16 @@ function enginePipelineTick(timestamp) {
                 }
                 if (bounced) continue;
 
-                // --- Platform collisions (with proper repositioning) ---
+                // platform collisions
                 let hitPlatform = false;
                 for (let plat of platforms) {
                     if (t.x + t.radius > plat.x && t.x - t.radius < plat.x + plat.w &&
                         t.y + t.radius > plat.y && t.y - t.radius < plat.y + plat.h) {
-
-                        // Calculate minimum overlap direction
                         const left = t.x + t.radius - plat.x;
                         const right = plat.x + plat.w - (t.x - t.radius);
                         const top = t.y + t.radius - plat.y;
                         const bottom = plat.y + plat.h - (t.y - t.radius);
                         const minOver = Math.min(left, right, top, bottom);
-
                         if (minOver === left || minOver === right) {
                             t.vx = -t.vx * 0.7;
                             if (minOver === left) t.x = plat.x - t.radius;
@@ -2494,7 +3074,7 @@ function enginePipelineTick(timestamp) {
                             if (Math.abs(t.vx) < 0.2) t.vx = 0;
                             if (minOver === top) t.y = plat.y - t.radius;
                             else t.y = plat.y + plat.h + t.radius;
-                            t.life -= 0.5; // extra life loss on floor impact
+                            t.life -= 0.5;
                         }
                         hitPlatform = true;
                         break;
@@ -2502,7 +3082,7 @@ function enginePipelineTick(timestamp) {
                 }
                 if (hitPlatform) continue;
 
-                // --- Hazard collisions ---
+                // hazard collisions
                 let hitHazard = false;
                 for (let h of hazards) {
                     if (t.x + t.radius > h.x && t.x - t.radius < h.x + h.w &&
@@ -2528,7 +3108,7 @@ function enginePipelineTick(timestamp) {
                 }
                 if (hitHazard) continue;
 
-                // --- Player collisions ---
+                // player collisions
                 let hitPlayer = false;
                 for (let id in players) {
                     if (id === t.ownerId) continue;
@@ -2539,9 +3119,7 @@ function enginePipelineTick(timestamp) {
                     const dist = Math.hypot(dx, dy);
                     if (dist < t.radius + target.width / 2) {
                         const angle = Math.atan2(t.vy, t.vx);
-
                         if (t.dropItem) {
-                            // Dropped item (empty pistol) – soft bounce
                             t.vx = Math.cos(angle) * Math.abs(t.vx) * 0.5;
                             t.vy = Math.sin(angle) * Math.abs(t.vy) * 0.5;
                             const pushX = dx / dist * (t.radius + target.width / 2);
@@ -2551,13 +3129,11 @@ function enginePipelineTick(timestamp) {
                             hitPlayer = true;
                             break;
                         }
-
-                        // Always apply knockback to target
-                        target.vx += Math.cos(angle) * 15;
-                        target.vy += Math.sin(angle) * 15;
-
+                        // Apply knockback to target
+                        target.knockbackTimer = 0.25;
+                        target.knockbackVx = Math.cos(angle) * 15;
+                        target.knockbackVy = Math.sin(angle) * 15;
                         if (target.item !== null) {
-                            // Target holds an item – bounce off, don't spawn
                             t.vx = Math.cos(angle) * Math.abs(t.vx) * 0.7;
                             t.vy = Math.sin(angle) * Math.abs(t.vy) * 0.7;
                             t.life = Math.max(t.life - 30, 30);
@@ -2566,25 +3142,22 @@ function enginePipelineTick(timestamp) {
                             t.x += pushX * 0.8;
                             t.y += pushY * 0.8;
                             playSound('spike');
-                            hitPlayer = true;
-                            break;
                         } else {
-                            // Target has no item – spawn item and remove throwable
                             const dropX = target.x + target.width / 2 - 12;
                             const dropY = target.y + target.height - 12;
                             itemManager.spawnItem(dropX, dropY, t.itemType, 0, false, t.ammo);
                             broadcastWorldItems();
                             throwables.splice(i, 1);
                             i--;
-                            hitPlayer = true;
-                            break;
                         }
+                        hitPlayer = true;
+                        break;
                     }
                 }
-                if (hitPlayer) break; // exit step loop because throwable may have been removed
+                if (hitPlayer) break;
             }
 
-            // After stepping, if life <= 0 and throwable still exists, spawn item at its position
+            // life expired → spawn item if not broken
             if (throwables[i] && t.life <= 0) {
                 const spawnX = t.x - 12;
                 const spawnY = t.y - 12;
@@ -2598,7 +3171,7 @@ function enginePipelineTick(timestamp) {
                 continue;
             }
 
-            // Also check for world‑out-of-bounds break after stepping (if life still positive)
+            // out-of-bounds break
             const breakX = (t.x + t.radius < -BREAK_BOUNDS_OFFSET || t.x - t.radius > WORLD_WIDTH + BREAK_BOUNDS_OFFSET);
             const breakY = (t.y + t.radius < -BREAK_BOUNDS_OFFSET || t.y - t.radius > WORLD_HEIGHT + BREAK_BOUNDS_OFFSET);
             if (breakX || breakY) {
@@ -2625,7 +3198,7 @@ function enginePipelineTick(timestamp) {
         updateAndRenderParticles();
         for (let id in players) {
             let p = players[id];
-            if (p.eliminated && p.id !== localPlayerId) continue; // still draw eliminated local? we draw all for now
+            if (p.eliminated && p.id !== localPlayerId) continue;
             if (p.isDashing) {
                 for (let i = 0; i < 2; i++) particles.push({
                     x: p.x + (p.facingRight ? 0 : p.width), y: p.y + Math.random() * p.height,
@@ -2639,7 +3212,11 @@ function enginePipelineTick(timestamp) {
         ctx.restore();
         drawOffscreenRadarIndicators();
 
-        // Spectator HUD message
+        // EXTRA SAFETY: After everything, ensure match ends if no players left (in case something was missed)
+        if (isHost && currentEngineMode === 'GAME') {
+            checkAllPlayersEliminatedAndEndMatch();
+        }
+
         if (spectatorMode && currentEngineMode === 'GAME') {
             ctx.font = 'bold 24px "Orbitron"';
             ctx.fillStyle = '#ffcc00';
@@ -2673,7 +3250,7 @@ function enginePipelineTick(timestamp) {
 }
 
 // ============================================================================
-//  INPUT HANDLING
+//  INPUT HANDLING (unchanged from earlier version)
 // ============================================================================
 
 window.addEventListener('keydown', (e) => {
@@ -2684,7 +3261,6 @@ window.addEventListener('keydown', (e) => {
     if (e.key === 'q' || e.key === 'Q') keys.Drop = true;
     if (e.code === 'ShiftLeft') keys.ShiftLeft = true;
 
-    // Spectator cycling with arrow keys (only when in spectator mode)
     if (spectatorMode && currentEngineMode === 'GAME') {
         if (e.key === 'ArrowLeft') {
             e.preventDefault();
@@ -2717,7 +3293,6 @@ window.addEventListener('wheel', (e) => {
 
 window.addEventListener('pointerdown', (e) => { if (e.button === 1) e.preventDefault(); });
 
-// Replace old mouse shoot/throw listeners with new functions
 canvas.addEventListener('mousedown', (e) => {
     if (spectatorMode) return;
     if (e.button === 0) {
@@ -2743,7 +3318,6 @@ function bindTouchBtn(id, action) {
 }
 bindTouchBtn('btn-left', 'left'); bindTouchBtn('btn-right', 'right'); bindTouchBtn('btn-jump', 'jump');
 
-// Mobile shoot/throw buttons
 document.addEventListener('DOMContentLoaded', () => {
     const shootBtn = document.getElementById('btn-shoot');
     const throwBtn = document.getElementById('btn-throw');
@@ -2770,7 +3344,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ============================================================================
-//  SKIN MENU & COLOR SELECTION
+//  SKIN MENU & COLOR SELECTION (unchanged)
 // ============================================================================
 
 function selectCharacterColor(hexColor, buttonElement) {
@@ -2828,7 +3402,7 @@ function openSkinMenu() {
 function closeSkinMenu() { document.getElementById('skin-modal').classList.add('hidden'); }
 
 // ============================================================================
-//  FACE DRAWING
+//  FACE DRAWING (unchanged)
 // ============================================================================
 
 let faceDrawingCanvas = null, faceDrawingCtx = null, faceOverlayCanvas = null, faceOverlayCtx = null;
@@ -2906,6 +3480,29 @@ window.saveFaceDrawing = saveFaceDrawing;
 window.openFaceDrawing = openFaceDrawing;
 window.closeFaceDrawing = closeFaceDrawing;
 
+// ============================================================================
+//  CONSOLE STATUS COMMAND
+// ============================================================================
+
+window.status = function () {
+    console.clear();
+    console.log("%c=== PLAYER STATUS ===", "color: #00f2fe; font-weight: bold;");
+    const playerList = Object.values(players).map(p => ({
+        "ID": p.id,
+        "Name": p.nameTag,
+        "Alive": p.eliminated ? "❌ DEAD" : "✅ ALIVE",
+        "Death Reason": p.deathReason || (p.eliminated ? "unknown" : "—"),
+        "Score": p.score,
+        "Position": `(${Math.floor(p.x)}, ${Math.floor(p.y)})`
+    }));
+    console.table(playerList);
+    const aliveCount = playerList.filter(p => p.Alive === "✅ ALIVE").length;
+    console.log(`%cAlive players: ${aliveCount} / ${playerList.length}`, `color: ${aliveCount === 0 ? "#ff007f" : "#00ff66"}; font-weight: bold;`);
+    if (aliveCount === 0 && currentEngineMode === 'GAME') {
+        console.log("%c⚠️ Match should end immediately! ⚠️", "color: #ffaa00; font-weight: bold;");
+    }
+};
+
 // ------------------------------------------------------------------
 // DEBUG / CONSOLE COMMANDS
 // ------------------------------------------------------------------
@@ -2919,16 +3516,13 @@ window.forceStartMatch = function () {
         return;
     }
     console.log("Forcing match start (bypassing door & player count)...");
-    // Cancel any pending lobby countdown
     if (lobbyTimerId) {
         clearInterval(lobbyTimerId);
         lobbyTimerId = null;
     }
     lobbyCountdownVal = -1;
     broadcastToRoom('sync_lobby_countdown', { value: -1 });
-    // Force start the match
     executeActiveMatchStart();
-    // Notify any connected clients (though there may be none)
     broadcastToRoom('trigger_match_start');
 };
 
