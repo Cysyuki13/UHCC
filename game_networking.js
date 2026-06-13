@@ -2564,6 +2564,12 @@ document.addEventListener('DOMContentLoaded', () => {
         scoreboardVisible = !scoreboardVisible;
         toggleBtn.textContent = '📊';
     });
+
+    // FIX: Settings modal close button
+    const closeSettingsBtn = document.getElementById('close-settings-btn');
+    if (closeSettingsBtn) {
+        closeSettingsBtn.addEventListener('click', saveSettings);
+    }
 });
 
 // ============================================================================
@@ -2625,12 +2631,27 @@ function openSkinMenu() {
 function closeSkinMenu() { document.getElementById('skin-modal').classList.add('hidden'); }
 
 // ============================================================================
-//  FACE DRAWING (unchanged)
+//  FACE DRAWING (fixed: global applyFaceDrawingMode)
 // ============================================================================
 
 let faceDrawingCanvas = null, faceDrawingCtx = null, faceOverlayCanvas = null, faceOverlayCtx = null;
 let isDrawingFace = false, currentDrawColorFace = '#FFFFFF', currentBrushSizeFace = 20;
 let eraserActiveFace = false, lastPenColorFace = '#FFFFFF', faceCanvasBgColor = '#0c0516';
+
+// GLOBAL apply mode
+function applyFaceDrawingMode() {
+    if (!faceOverlayCtx) return;
+    if (eraserActiveFace) {
+        faceOverlayCtx.globalCompositeOperation = 'destination-out';
+        faceOverlayCtx.strokeStyle = 'rgba(0,0,0,1)';
+    } else {
+        faceOverlayCtx.globalCompositeOperation = 'source-over';
+        faceOverlayCtx.strokeStyle = currentDrawColorFace;
+    }
+    faceOverlayCtx.lineWidth = currentBrushSizeFace;
+    faceOverlayCtx.lineCap = 'round';
+    faceOverlayCtx.lineJoin = 'round';
+}
 
 function initializeFaceCanvas() {
     faceDrawingCanvas = document.getElementById('faceDrawingCanvas');
@@ -2654,17 +2675,33 @@ function initializeFaceCanvas() {
         else { cx = e.clientX; cy = e.clientY; }
         return { x: Math.max(0, Math.min(faceDrawingCanvas.width, (cx - rect.left) * sx)), y: Math.max(0, Math.min(faceDrawingCanvas.height, (cy - rect.top) * sy)) };
     }
-    function start(e) { e.preventDefault(); isDrawingFace = true; const { x, y } = getCoords(e); faceOverlayCtx.beginPath(); faceOverlayCtx.moveTo(x, y); applyMode(); }
-    function draw(e) { if (!isDrawingFace) return; e.preventDefault(); const { x, y } = getCoords(e); faceOverlayCtx.lineTo(x, y); faceOverlayCtx.stroke(); compositeLayers(); }
-    function stop() { isDrawingFace = false; faceOverlayCtx.beginPath(); }
-    function applyMode() {
-        if (eraserActiveFace) { faceOverlayCtx.globalCompositeOperation = 'destination-out'; faceOverlayCtx.strokeStyle = 'rgba(0,0,0,1)'; }
-        else { faceOverlayCtx.globalCompositeOperation = 'source-over'; faceOverlayCtx.strokeStyle = currentDrawColorFace; }
-        faceOverlayCtx.lineWidth = currentBrushSizeFace; faceOverlayCtx.lineCap = 'round'; faceOverlayCtx.lineJoin = 'round';
+    function start(e) {
+        e.preventDefault();
+        isDrawingFace = true;
+        const { x, y } = getCoords(e);
+        faceOverlayCtx.beginPath();
+        faceOverlayCtx.moveTo(x, y);
+        applyFaceDrawingMode();
     }
-    faceDrawingCanvas.addEventListener('mousedown', start); faceDrawingCanvas.addEventListener('mousemove', draw);
-    faceDrawingCanvas.addEventListener('mouseup', stop); faceDrawingCanvas.addEventListener('mouseleave', stop);
-    faceDrawingCanvas.addEventListener('touchstart', start); faceDrawingCanvas.addEventListener('touchmove', draw); faceDrawingCanvas.addEventListener('touchend', stop);
+    function draw(e) {
+        if (!isDrawingFace) return;
+        e.preventDefault();
+        const { x, y } = getCoords(e);
+        faceOverlayCtx.lineTo(x, y);
+        faceOverlayCtx.stroke();
+        compositeLayers();
+    }
+    function stop() {
+        isDrawingFace = false;
+        faceOverlayCtx.beginPath();
+    }
+    faceDrawingCanvas.addEventListener('mousedown', start);
+    faceDrawingCanvas.addEventListener('mousemove', draw);
+    faceDrawingCanvas.addEventListener('mouseup', stop);
+    faceDrawingCanvas.addEventListener('mouseleave', stop);
+    faceDrawingCanvas.addEventListener('touchstart', start);
+    faceDrawingCanvas.addEventListener('touchmove', draw);
+    faceDrawingCanvas.addEventListener('touchend', stop);
 }
 function compositeLayers() { if (!faceDrawingCtx || !faceOverlayCtx) return; drawFaceCanvasBackground(); faceDrawingCtx.drawImage(faceOverlayCanvas, 0, 0); }
 function drawFaceCanvasBackground() {
@@ -2678,11 +2715,11 @@ function toggleEraserFace() {
     const btn = document.getElementById('eraserBtn');
     if (!eraserActiveFace) { eraserActiveFace = true; lastPenColorFace = currentDrawColorFace; currentDrawColorFace = faceCanvasBgColor; if (btn) { btn.style.backgroundColor = '#ff007f'; btn.style.color = 'white'; btn.innerText = '✏️ PEN MODE'; } }
     else deactivateEraserFace();
-    if (faceOverlayCtx) applyMode();
+    if (faceOverlayCtx) applyFaceDrawingMode();
 }
-function deactivateEraserFace() { eraserActiveFace = false; currentDrawColorFace = lastPenColorFace; const btn = document.getElementById('eraserBtn'); if (btn) { btn.style.backgroundColor = ''; btn.style.color = '#ff007f'; btn.innerText = '🧽 ERASER MODE'; } if (faceOverlayCtx) applyMode(); }
-function setDrawColorFace(col) { if (eraserActiveFace) deactivateEraserFace(); currentDrawColorFace = col; }
-function setBrushSizeFace(size) { currentBrushSizeFace = parseInt(size); document.getElementById('brushSizeDisplay').innerText = size; }
+function deactivateEraserFace() { eraserActiveFace = false; currentDrawColorFace = lastPenColorFace; const btn = document.getElementById('eraserBtn'); if (btn) { btn.style.backgroundColor = ''; btn.style.color = '#ff007f'; btn.innerText = '🧽 ERASER MODE'; } if (faceOverlayCtx) applyFaceDrawingMode(); }
+function setDrawColorFace(col) { if (eraserActiveFace) deactivateEraserFace(); currentDrawColorFace = col; if (faceOverlayCtx) applyFaceDrawingMode(); }
+function setBrushSizeFace(size) { currentBrushSizeFace = parseInt(size); document.getElementById('brushSizeDisplay').innerText = size; if (faceOverlayCtx) applyFaceDrawingMode(); }
 function resetFaceDrawing() { if (faceOverlayCtx) { faceOverlayCtx.clearRect(0, 0, faceOverlayCanvas.width, faceOverlayCanvas.height); compositeLayers(); } }
 function saveFaceDrawing() {
     const data = faceOverlayCanvas.toDataURL('image/png');
