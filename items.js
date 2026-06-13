@@ -3,6 +3,8 @@
 // ------------------------------------------------------------------
 // Base Item Class (the "usable" item held by a player)
 // ------------------------------------------------------------------
+// items.js - Update the UsableItem base class
+
 class UsableItem {
     constructor(name, svgPath, cooldownSeconds = 0.75) {
         this.name = name;
@@ -56,6 +58,13 @@ class UsableItem {
     }
 
     onUse(player, gameState) {
+        // --- BYPASS COOLDOWN FOR REMOTE CLIENTS ON HOST ---
+        // Since the host doesn't actively update cooldowns for remote background players,
+        // and the client already throttles inputs locally, we skip the check here.
+        if (typeof isHost !== 'undefined' && isHost && player.id !== localPlayerId) {
+            return true;
+        }
+
         if (!this.canUse()) return false;
         this.cooldown = this.cooldownMax;
         return true;
@@ -98,7 +107,12 @@ class pistolItem extends UsableItem {
             knockback: this.knockbackForce
         };
         gameState.projectiles.push(projectile);
+
         this.ammo--;
+
+        // --- ADD THIS LINE TO FIX AMMO DESYNC ---
+        player.ammo = this.ammo;
+
         return true;
     }
 }
@@ -255,7 +269,12 @@ class WorldItem {
         }
 
         if (previewImg && previewImg.complete) {
-            ctx.drawImage(previewImg, this.x, this.y, this.w, this.h);
+            let drawY = this.y;
+            // Vertical offset for robot hand to prevent clipping into the floor
+            if (this.itemType === 'robot_hand') {
+                drawY -= 10;
+            }
+            ctx.drawImage(previewImg, this.x, drawY, this.w, this.h);
         } else {
             ctx.fillStyle = '#ffaa44';
             ctx.fillRect(this.x, this.y, this.w, this.h);

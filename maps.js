@@ -50,8 +50,8 @@ const MAPS = {
     "spawnPoints": [
       {
         "id": 1,
-        "x": 1380,
-        "y": 1240
+        "x": 1360,
+        "y": 1280
       }
     ],
     "cameraBounds": {
@@ -74,6 +74,13 @@ const MAPS = {
         "w": 70,
         "h": 110,
         "color": "#ffcc00"
+      },
+      "settingsDoor": {
+        "x": 2000,
+        "y": 1028,
+        "w": 70,
+        "h": 110,
+        "color": "#aa66ff"
       }
     },
     "scoreboard": {

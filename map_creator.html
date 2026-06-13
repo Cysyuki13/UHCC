@@ -280,6 +280,7 @@
             <button id="toolSpawn" class="mode-btn">⭐ Spawn Point</button>
             <button id="toolSkinDoor" class="mode-btn">🎨 Skin Door</button>
             <button id="toolLobbyDoor" class="mode-btn">🚪 Lobby Door</button>
+            <button id="toolSettingsDoor" class="mode-btn">⚙️ Settings Door</button>
             <button id="toolFinish" class="mode-btn">🏁 Finish Line</button>
             <div class="coord-status" id="coordStatus">Select mode: click to select, drag or arrow keys to move</div>
         </div>
@@ -454,6 +455,7 @@
             ],
             skinDoor: { x: 220, y: 390, w: 70, h: 110, color: '#ff007f' },
             lobbyDoor: { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' },
+            settingsDoor: { x: 1200, y: 530, w: 70, h: 110, color: '#aa66ff' },
             finishLine: null,
             cameraBounds: { ...DEFAULT_CAMERA_BOUNDS },
             scoreboard: { x: 50, y: 50, w: 250, h: 200 },
@@ -704,6 +706,8 @@
                     return { type: "skinDoor", index: -1, ref: data.skinDoor };
                 if (data.lobbyDoor && mx >= data.lobbyDoor.x && mx <= data.lobbyDoor.x + data.lobbyDoor.w && my >= data.lobbyDoor.y && my <= data.lobbyDoor.y + data.lobbyDoor.h)
                     return { type: "lobbyDoor", index: -1, ref: data.lobbyDoor };
+                if (data.settingsDoor && mx >= data.settingsDoor.x && mx <= data.settingsDoor.x + data.settingsDoor.w && my >= data.settingsDoor.y && my <= data.settingsDoor.y + data.settingsDoor.h)
+                    return { type: "settingsDoor", index: -1, ref: data.settingsDoor };
             }
             for (let i = 0; i < data.gems.length; i++) {
                 const g = data.gems[i];
@@ -731,6 +735,7 @@
             if (obj.type === "finish" && currentMapType === "match") data.finishLine = null;
             if (obj.type === "skinDoor" && currentMapType === "lobby") data.skinDoor = null;
             if (obj.type === "lobbyDoor" && currentMapType === "lobby") data.lobbyDoor = null;
+            if (obj.type === "settingsDoor" && currentMapType === "lobby") data.settingsDoor = null;
             if (selectedObj && selectedObj.type === obj.type && selectedObj.index === obj.index) clearSelection();
             saveState();
             render();
@@ -766,6 +771,9 @@
                 case "lobbyDoor":
                     if (currentMapType === "lobby") data.lobbyDoor = { x, y, w: 70, h: 110, color: '#ffcc00' };
                     break;
+                case "settingsDoor":
+                    if (currentMapType === "lobby") data.settingsDoor = { x, y, w: 70, h: 110, color: '#aa66ff' };
+                    break;
                 case "finish":
                     if (currentMapType === "match") data.finishLine = { x, y, w: 70, h: 80, color: '#00ff66' };
                     break;
@@ -799,12 +807,14 @@
             if (isLobby) {
                 newData.skinDoor = jsonObj.doors.skinDoor ? { ...jsonObj.doors.skinDoor, color: '#ff007f' } : null;
                 newData.lobbyDoor = jsonObj.doors.lobbyDoor ? { ...jsonObj.doors.lobbyDoor, color: '#ffcc00' } : null;
+                newData.settingsDoor = jsonObj.doors.settingsDoor ? { ...jsonObj.doors.settingsDoor, color: '#aa66ff' } : null;
                 newData.finishLine = null;
                 newData.scoreboard = jsonObj.scoreboard || { x: 50, y: 50, w: 250, h: 200 };
             } else {
                 newData.finishLine = jsonObj.finishLine ? { ...jsonObj.finishLine, color: '#00ff66' } : null;
                 newData.skinDoor = null;
                 newData.lobbyDoor = null;
+                newData.settingsDoor = null;
             }
             return newData;
         }
@@ -1212,6 +1222,10 @@
                     minimapCtx.fillStyle = "#ffcc00";
                     minimapCtx.fillRect(data.lobbyDoor.x * scaleX, data.lobbyDoor.y * scaleY, data.lobbyDoor.w * scaleX, data.lobbyDoor.h * scaleY);
                 }
+                if (data.settingsDoor) {
+                    minimapCtx.fillStyle = "#aa66ff";
+                    minimapCtx.fillRect(data.settingsDoor.x * scaleX, data.settingsDoor.y * scaleY, data.settingsDoor.w * scaleX, data.settingsDoor.h * scaleY);
+                }
             } else {
                 if (data.finishLine) {
                     minimapCtx.fillStyle = "#00ff66";
@@ -1238,6 +1252,7 @@
             if (currentMapType === "lobby") {
                 if (data.skinDoor) drawRect(data.skinDoor, "#ff007f", true);
                 if (data.lobbyDoor) drawRect(data.lobbyDoor, "#ffcc00", true);
+                if (data.settingsDoor) drawRect(data.settingsDoor, "#aa66ff", true);
             }
             if (currentMapType === "match" && data.finishLine) {
                 ctx.save();
@@ -1283,6 +1298,7 @@
             if (currentMapType === "lobby") {
                 html += `<div><strong>🎨 Skin Door</strong> ${data.skinDoor ? `(${Math.round(data.skinDoor.x)},${Math.round(data.skinDoor.y)})` : 'none'} <button onclick="deleteDoor('skin')">Remove</button></div>`;
                 html += `<div><strong>🚪 Lobby Door</strong> ${data.lobbyDoor ? `(${Math.round(data.lobbyDoor.x)},${Math.round(data.lobbyDoor.y)})` : 'none'} <button onclick="deleteDoor('lobby')">Remove</button></div>`;
+                html += `<div><strong>⚙️ Settings Door</strong> ${data.settingsDoor ? `(${Math.round(data.settingsDoor.x)},${Math.round(data.settingsDoor.y)})` : 'none'} <button onclick="deleteDoor('settings')">Remove</button></div>`;
             } else {
                 html += `<div><strong>🏁 Finish Line</strong> ${data.finishLine ? `(${Math.round(data.finishLine.x)},${Math.round(data.finishLine.y)})` : 'none'} <button onclick="deleteFinishLine()">Remove</button></div>`;
             }
@@ -1303,7 +1319,8 @@
             const data = getCurrentData();
             if (doorType === 'skin') data.skinDoor = null;
             if (doorType === 'lobby') data.lobbyDoor = null;
-            if (selectedObj && (selectedObj.type === 'skinDoor' || selectedObj.type === 'lobbyDoor')) clearSelection();
+            if (doorType === 'settings') data.settingsDoor = null;
+            if (selectedObj && (selectedObj.type === 'skinDoor' || selectedObj.type === 'lobbyDoor' || selectedObj.type === 'settingsDoor')) clearSelection();
             saveState();
             render();
         };
@@ -1334,6 +1351,7 @@
         document.getElementById('toolSpawn').onclick = () => setActiveTool('spawn');
         document.getElementById('toolSkinDoor').onclick = () => setActiveTool('skinDoor');
         document.getElementById('toolLobbyDoor').onclick = () => setActiveTool('lobbyDoor');
+        document.getElementById('toolSettingsDoor').onclick = () => setActiveTool('settingsDoor');
         document.getElementById('toolFinish').onclick = () => setActiveTool('finish');
         document.getElementById('snapToggle').onclick = function () { snapEnabled = !snapEnabled; this.textContent = snapEnabled ? "🔘 Snap ON" : "🔘 Snap OFF"; };
         document.getElementById('showGrid').onchange = (e) => { showGrid = e.target.checked; render(); };
@@ -1341,7 +1359,7 @@
             if (confirm(`Clear all ${currentMapType} objects?`)) {
                 const empty = {
                     platforms: [], hazards: [], gems: [], spawnPoints: [],
-                    skinDoor: null, lobbyDoor: null, finishLine: null,
+                    skinDoor: null, lobbyDoor: null, settingsDoor: null, finishLine: null,
                     cameraBounds: { ...DEFAULT_CAMERA_BOUNDS }
                 };
                 if (currentMapType === "lobby") lobbyData = empty;
@@ -1388,7 +1406,8 @@
             if (currentMapType === "lobby") {
                 base.doors = {
                     skinDoor: data.skinDoor || { x: 220, y: 390, w: 70, h: 110, color: '#ff007f' },
-                    lobbyDoor: data.lobbyDoor || { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' }
+                    lobbyDoor: data.lobbyDoor || { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' },
+                    settingsDoor: data.settingsDoor || { x: 1200, y: 530, w: 70, h: 110, color: '#aa66ff' }
                 };
                 base.scoreboard = data.scoreboard || { x: 50, y: 50, w: 250, h: 200 };
             } else {
@@ -1433,7 +1452,8 @@
                     spawnPoints: lobby.spawnPoints.map(s => ({ id: s.id, x: s.x, y: s.y })),
                     doors: {
                         skinDoor: lobby.skinDoor || { x: 220, y: 390, w: 70, h: 110, color: '#ff007f' },
-                        lobbyDoor: lobby.lobbyDoor || { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' }
+                        lobbyDoor: lobby.lobbyDoor || { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' },
+                        settingsDoor: lobby.settingsDoor || { x: 1200, y: 530, w: 70, h: 110, color: '#aa66ff' }
                     },
                     scoreboard: lobby.scoreboard || { x: 50, y: 50, w: 250, h: 200 },
                     cameraBounds: lobby.cameraBounds || { ...DEFAULT_CAMERA_BOUNDS }
