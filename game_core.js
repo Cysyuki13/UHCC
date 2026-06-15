@@ -1,4 +1,27 @@
 // ============================================================================
+//  PLACEMENT PHASE STATE TRACKING
+// ============================================================================
+let matchPhase = 'PLAY'; // States: 'CHOOSE', 'PLACE', 'PLAY'
+let placementPool = [];   // Shared objects list available to draft
+let playerSelectedBlock = {}; // Mapping: { playerId: blockObject }
+let placementCursors = {};    // Mapping: { playerId: { x, y, confirmed } }
+
+// Track local clicks for selection triggers
+window.mouseJustClicked = false;
+window.addEventListener('mousedown', () => {
+    window.mouseJustClicked = true;
+});
+
+// Tetris-like shape grid configurations for placement
+const DRAFT_SHAPES = [
+    { type: 'I_BLOCK', w: 160, h: 40, color: '#00f2fe', blocks: [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 80, y: 0 }, { x: 120, y: 0 }] },
+    { type: 'O_BLOCK', w: 80, h: 80, color: '#ffcc00', blocks: [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 0, y: 40 }, { x: 40, y: 40 }] },
+    { type: 'T_BLOCK', w: 120, h: 80, color: '#aa66ff', blocks: [{ x: 40, y: 0 }, { x: 0, y: 40 }, { x: 40, y: 40 }, { x: 80, y: 40 }] },
+    { type: 'L_BLOCK', w: 80, h: 120, color: '#ff9900', blocks: [{ x: 0, y: 0 }, { x: 0, y: 40 }, { x: 0, y: 80 }, { x: 40, y: 80 }] },
+    { type: 'Z_BLOCK', w: 120, h: 80, color: '#ff007f', blocks: [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 40 }, { x: 80, y: 40 }] }
+];
+
+// ============================================================================
 //  SOUND & UI
 // ============================================================================
 
@@ -73,16 +96,15 @@ function switchPanel(panelId) {
 // ============================================================================
 
 function performShoot() {
+    if (matchPhase !== 'PLAY') return; // Disable shooting during setup draft phases
     if (!localPlayerItem) return;
     if (players[localPlayerId]?.eliminated) return;
 
-    // Prevent using robot hand again if an active grab already exists
     if (localPlayerItem.name === 'robot_hand' && activeRobotHands.some(g => g.holderId === localPlayerId)) {
         console.warn("[RobotHand] Already have an active grab, cannot shoot again.");
         return;
     }
 
-    // Pistol: check ammo
     if (localPlayerItem.name === 'pistol' && localPlayerItem.ammo !== undefined && localPlayerItem.ammo <= 0) {
         if (emptyPistolSound) {
             emptyPistolSound.currentTime = 0;
@@ -93,7 +115,6 @@ function performShoot() {
 
     if (!localPlayerItem.canUse()) return;
 
-    // --- CLIENT-SIDE ANGLE VALIDATION FOR ROBOT HAND ---
     if (!isHost && localPlayerItem.name === 'robot_hand') {
         const angle = calculateHandAngle(players[localPlayerId]);
         const facingAngle = players[localPlayerId].facingRight ? 0 : Math.PI;
@@ -103,53 +124,25 @@ function performShoot() {
         const MAX_ANGLE_OFFSET = (60 * Math.PI) / 180;
         if (Math.abs(diff) > MAX_ANGLE_OFFSET) {
             console.warn(`[RobotHand] Client blocked shoot: angle ${angle.toFixed(2)} out of range.`);
-            if (emptyPistolSound) {
-                emptyPistolSound.currentTime = 0;
-                emptyPistolSound.play().catch(e => console.warn("Wrong direction sound play failed:", e));
-            }
             return;
         }
     }
 
     if (isHost) {
-        const gameState = {
-            projectiles,
-            activeRobotHands,
-            mouseWorld: getMouseWorldPos()
-        };
-
-        // Play sound immediately if it can be used
-        if (localPlayerItem.name === 'pistol') {
-            playPistolSound();
-        } else if (localPlayerItem.name === 'robot_hand') {
-            playRobotHandSound();
-        }
+        const gameState = { projectiles, activeRobotHands, mouseWorld: getMouseWorldPos() };
         const used = localPlayerItem.onUse(players[localPlayerId], gameState);
 
         if (used) {
-            // Play appropriate sound based on item type
-            if (localPlayerItem.name === 'pistol') {
-                playPistolSound();
-            } else if (localPlayerItem.name === 'robot_hand') {
-                playRobotHandSound();
-            }
+            if (localPlayerItem.name === 'pistol') playPistolSound();
+            else if (localPlayerItem.name === 'robot_hand') playRobotHandSound();
 
             if (players[localPlayerId].item) {
                 players[localPlayerId].ammo = players[localPlayerId].item.ammo;
             }
-
             broadcastToRoom('sync_players', { allPlayers: players });
-
-            if (!players[localPlayerId].item) {
-                localPlayerItem = null;
-            }
-
-        } else if (emptyPistolSound) {
-            emptyPistolSound.currentTime = 0;
-            emptyPistolSound.play().catch(e => console.warn("Empty pistol sound play failed:", e));
+            if (!players[localPlayerId].item) localPlayerItem = null;
         }
     } else {
-        // --- Client prediction branch ---
         const isRobotHand = (localPlayerItem.name === 'robot_hand');
         const isPistol = (localPlayerItem.name === 'pistol');
 
@@ -164,8 +157,6 @@ function performShoot() {
         }
 
         const angle = calculateHandAngle(players[localPlayerId]);
-        console.log(`[CLIENT] Sending shoot request. Ammo left: ${localPlayerItem?.ammo}`);
-
         hostConnection.send({
             type: 'client_shoot',
             senderId: localPlayerId,
@@ -176,20 +167,14 @@ function performShoot() {
             }
         });
 
-        if (localPlayerItem) {
-            localPlayerItem.cooldown = localPlayerItem.cooldownMax;
-        }
-
-        // Play appropriate sound based on item type
-        if (isRobotHand) {
-            playRobotHandSound();
-        } else if (isPistol) {
-            playPistolSound();
-        }
+        if (localPlayerItem) localPlayerItem.cooldown = localPlayerItem.cooldownMax;
+        if (isRobotHand) playRobotHandSound();
+        else if (isPistol) playPistolSound();
     }
 }
 
 function performThrow() {
+    if (matchPhase !== 'PLAY') return; // Restrict item drops/throws during setup
     if (!players[localPlayerId] || !players[localPlayerId].item) return;
     if (players[localPlayerId].eliminated) return;
     const angle = calculateHandAngle(players[localPlayerId]);
@@ -207,27 +192,22 @@ function performThrow() {
 let itemManager = null;
 let localPlayerItem = null;
 let projectiles = [];
-let activeRobotHands = [];      // Robot hand grab data
+let activeRobotHands = [];
 let lastRobotHandSnapshot = null;
 const THROWABLE_GRAVITY = 0.35;
 
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
-// Canvas render size (fixed)
 const BASE_WIDTH = 1280;
 const BASE_HEIGHT = 720;
 canvas.width = BASE_WIDTH;
 canvas.height = BASE_HEIGHT;
 
-// World size (matches map_creator's virtual size)
 const WORLD_WIDTH = 3840;
 const WORLD_HEIGHT = 2160;
 
-// Camera bounds (per map)
 let cameraBounds = { minX: 0, minY: 0, maxX: WORLD_WIDTH, maxY: WORLD_HEIGHT };
-
-// Void threshold (per map) – default 2000 to avoid immediate death
 let voidYThreshold = 2000;
 
 const GRAVITY = 0.35;
@@ -271,15 +251,11 @@ let hazards = [];
 let gems = [];
 let spawnPoints = [];
 
-// Spectator mode
 let spectatorMode = false;
 let spectatorTargetId = null;
 let spectatorCycleButtonsAdded = false;
-
-// Match ending flag to prevent duplicate endings
 let matchEndingInProgress = false;
 
-// Settings door and preferences
 let settingsDoor = { x: 1560, y: 1268, w: 70, h: 110, color: '#aa66ff' };
 let currentSelectedGameMode = 'active_match';
 let currentSelectedMapName = 'match';
@@ -288,7 +264,6 @@ function getAlivePlayers() {
     return Object.values(players).filter(p => !p.eliminated);
 }
 
-// Helper to end match if no players left alive
 function checkAllPlayersEliminatedAndEndMatch() {
     if (!isHost || currentEngineMode !== 'GAME') return false;
     if (matchEndingInProgress) return false;
@@ -296,26 +271,12 @@ function checkAllPlayersEliminatedAndEndMatch() {
     const alive = getAlivePlayers();
     if (alive.length === 0) {
         matchEndingInProgress = true;
-        console.log("[MATCH END] All players eliminated. Ending match.");
+        if (gameTimer) { clearInterval(gameTimer); gameTimer = null; }
+        if (raceTimerId) { clearInterval(raceTimerId); raceTimerId = null; }
 
-        // Stop any running timers immediately
-        if (gameTimer) {
-            clearInterval(gameTimer);
-            gameTimer = null;
-        }
-        if (raceTimerId) {
-            clearInterval(raceTimerId);
-            raceTimerId = null;
-        }
-
-        // Build results with current scores
         let results = [];
         for (let id in players) {
-            results.push({
-                id,
-                nameTag: players[id].nameTag,
-                score: players[id].score
-            });
+            results.push({ id, nameTag: players[id].nameTag, score: players[id].score });
         }
         broadcastToRoom('match_over', { summary: results });
         executeMatchEndingSequence(results);
@@ -332,7 +293,6 @@ function cycleSpectator(direction) {
     if (currentIndex === -1) currentIndex = 0;
     let newIndex = (currentIndex + direction + alive.length) % alive.length;
     spectatorTargetId = alive[newIndex].id;
-    // Update camera immediately
     updateCameraToTarget();
 }
 
@@ -354,7 +314,6 @@ function updateCameraToTarget() {
 
 function repositionAllPlayersToSpawnPoints() {
     if (spawnPoints.length === 0) return;
-    // Use the first spawn point for all players
     const sp = spawnPoints[0];
     for (let id in players) {
         players[id].x = sp.x;
@@ -397,7 +356,7 @@ const PLAYER_COLORS = [
     '#8B4513', '#FFC0CB', '#800080', '#FFA500', '#808080', '#63c363'
 ];
 
-const keys = { ArrowLeft: false, ArrowRight: false, ArrowUp: false, ShiftLeft: false, Interact: false, Drop: false };
+const keys = { ArrowLeft: false, ArrowRight: false, ArrowUp: false, ShiftLeft: false, Interact: false, Drop: false, KeyW: false, KeyA: false, KeyS: false, KeyD: false };
 const touchState = { left: false, right: false, jump: false };
 
 let mousePos = { x: 0, y: 0 };
@@ -416,9 +375,6 @@ function getMouseWorldPos() {
     };
 }
 
-// ------------------------------------------------------------------
-// TOUCH AIMING (mobile)
-// ------------------------------------------------------------------
 function getTouchWorldPos(touch) {
     const rect = canvas.getBoundingClientRect();
     const canvasX = (touch.clientX - rect.left) * (canvas.width / rect.width);
@@ -430,8 +386,8 @@ function getTouchWorldPos(touch) {
 }
 
 function handleTouchAim(e) {
-    if (!players[localPlayerId]) return;
-    if (players[localPlayerId].eliminated) return;
+    if (matchPhase !== 'PLAY') return;
+    if (!players[localPlayerId] || players[localPlayerId].eliminated) return;
     e.preventDefault();
     if (e.touches.length === 0) return;
     const touch = e.touches[0];
@@ -468,7 +424,7 @@ function releaseSlot(peerId) {
 }
 
 // ============================================================================
-//  ENVIRONMENT SETUP (with camera bounds and void threshold)
+//  ENVIRONMENT SETUP 
 // ============================================================================
 
 function setupLobbyEnvironment() {
@@ -481,13 +437,10 @@ function setupLobbyEnvironment() {
 
     if (map.scoreboard) {
         window.lobbyScoreboardPos = { x: map.scoreboard.x, y: map.scoreboard.y, w: map.scoreboard.w, h: map.scoreboard.h };
-        console.log("[Setup] Scoreboard position from map:", window.lobbyScoreboardPos);
     } else {
         window.lobbyScoreboardPos = { x: 50, y: 50, w: 250, h: 200 };
-        console.log("[Setup] Scoreboard using default position");
     }
 
-    // Read spawn points from map
     spawnPoints = (map.spawnPoints || []).map(sp => ({ x: sp.x, y: sp.y }));
     if (spawnPoints.length === 0) {
         spawnPoints = [
@@ -500,20 +453,16 @@ function setupLobbyEnvironment() {
         if (map.doors.lobbyDoor) Object.assign(lobbyDoor, map.doors.lobbyDoor);
         if (map.doors.settingsDoor) Object.assign(settingsDoor, map.doors.settingsDoor);
     }
-    // Spawn items from map
     if (map.items && Array.isArray(map.items)) {
         itemManager.worldItems = [];
         for (let item of map.items) {
             itemManager.spawnItem(item.x, item.y, item.itemType, item.initialDelay || 0, item.shouldRespawn !== false, item.ammo || 3);
         }
     } else {
-        // default pistol for lobby (only if no items defined)
         itemManager.worldItems = [];
         itemManager.spawnItem(300, 580, 'pistol', 0, true, 3);
     }
-    // Set camera bounds
     cameraBounds = map.cameraBounds || { minX: 0, minY: 0, maxX: WORLD_WIDTH, maxY: WORLD_HEIGHT };
-    // Set void threshold
     voidYThreshold = (map.voidYThreshold !== undefined) ? map.voidYThreshold : 2000;
 }
 
@@ -522,29 +471,23 @@ function setupActiveMatchEnvironment() {
     platforms = map.platforms || [];
     hazards = map.hazards || [];
     gems = (map.gems || []).map(g => ({ ...g, collected: false }));
-    // Read spawn points
     spawnPoints = (map.spawnPoints || []).map(sp => ({ x: sp.x, y: sp.y }));
     if (spawnPoints.length === 0) {
         spawnPoints = [{ x: 100, y: 400 }, { x: 150, y: 400 }, { x: 200, y: 400 }];
     }
     if (map.finishLine) Object.assign(finishLine, map.finishLine);
-    // Items from map
     if (map.items && Array.isArray(map.items) && itemManager) {
         itemManager.worldItems = [];
         for (let item of map.items) {
             itemManager.spawnItem(item.x, item.y, item.itemType, item.initialDelay || 0, item.shouldRespawn !== false, item.ammo || 3);
         }
     } else if (itemManager) {
-        // optional default items (none by default)
         itemManager.worldItems = [];
     }
     cameraBounds = map.cameraBounds || { minX: 0, minY: 0, maxX: WORLD_WIDTH, maxY: WORLD_HEIGHT };
     voidYThreshold = (map.voidYThreshold !== undefined) ? map.voidYThreshold : 2000;
 }
 
-// ------------------------------------------------------------------
-// HOST LOBBY RESET FUNCTION (with version)
-// ------------------------------------------------------------------
 function hostResetLobby() {
     if (!isHost || currentEngineMode !== 'LOBBY') return;
 
@@ -557,14 +500,8 @@ function hostResetLobby() {
 
     setupLobbyEnvironment();
 
-    if (lobbyTimerId) {
-        clearInterval(lobbyTimerId);
-        lobbyTimerId = null;
-    }
-    if (raceTimerId) {
-        clearInterval(raceTimerId);
-        raceTimerId = null;
-    }
+    if (lobbyTimerId) { clearInterval(lobbyTimerId); lobbyTimerId = null; }
+    if (raceTimerId) { clearInterval(raceTimerId); raceTimerId = null; }
     lobbyCountdownVal = -1;
     raceCountdownVal = -1;
     raceStarted = false;
@@ -573,6 +510,7 @@ function hostResetLobby() {
 
     readyPlayers = {};
     localPlayerItem = null;
+    matchPhase = 'PLAY';
     resetVersion++;
     broadcastToRoom('sync_players', { allPlayers: players, reset: true });
     broadcastToRoom('sync_ready_players', { readyPlayers });
@@ -587,9 +525,6 @@ function hostResetLobby() {
     updateHudDisplays();
 }
 
-// ------------------------------------------------------------------
-// Show/hide reset button based on host and engine mode
-// ------------------------------------------------------------------
 function updateResetButtonVisibility() {
     const resetBtn = document.getElementById('reset-lobby-btn');
     if (!resetBtn) return;
@@ -646,7 +581,7 @@ function createPlayerProfile(id, nameTag) {
 // ============================================================================
 
 function voidRespawnLobby(player) {
-    console.warn(`[VOID RESPAWN LOBBY] ${player.id} fell below ${voidYThreshold} from (${player.x},${player.y})`);
+    console.warn(`[VOID RESPAWN LOBBY] ${player.id} fell below ${voidYThreshold}`);
     if (spawnPoints.length === 0) {
         player.x = 100;
         player.y = 500;
@@ -680,7 +615,6 @@ function voidEliminateGame(player, reason) {
     player.itemType = null;
     player.ammo = 0;
     player.knockbackTimer = 0;
-    // Clear any active grab involving this player
     if (isHost) {
         activeRobotHands = activeRobotHands.filter(g => g.holderId !== player.id && g.targetId !== player.id);
         for (let id in players) {
@@ -689,9 +623,7 @@ function voidEliminateGame(player, reason) {
         broadcastRobotHands();
     }
     playSound('spike');
-    console.log(`[ELIMINATED] ${player.id} (${player.nameTag}) eliminated. Reason: ${player.deathReason}. Remaining alive: ${getAlivePlayers().length}`);
 
-    // If local player eliminated, enter spectator mode
     if (player.id === localPlayerId && currentEngineMode === 'GAME') {
         spectatorMode = true;
         const alive = getAlivePlayers();
@@ -701,7 +633,6 @@ function voidEliminateGame(player, reason) {
         }
         document.getElementById('spectator-controls')?.classList.remove('hidden');
     }
-    // Host: check if all players eliminated (immediate match end)
     if (isHost && currentEngineMode === 'GAME') {
         checkAllPlayersEliminatedAndEndMatch();
     }
@@ -709,6 +640,7 @@ function voidEliminateGame(player, reason) {
 
 function checkVoidDeath() {
     if (currentEngineMode !== 'LOBBY' && currentEngineMode !== 'GAME') return;
+    if (matchPhase !== 'PLAY') return; // Delay physical void calculations during setup steps
     const isGame = (currentEngineMode === 'GAME');
     for (let id in players) {
         const p = players[id];
@@ -749,13 +681,8 @@ function broadcastRobotHands() {
     const snap = JSON.stringify(activeRobotHands);
     if (snap === lastRobotHandSnapshot) return;
     lastRobotHandSnapshot = snap;
-    console.log(`[RobotHand] Broadcasting activeRobotHands: ${activeRobotHands.length} entries`);
     broadcastToRoom('sync_robot_hands', { activeRobotHands });
 }
-
-// ============================================================================
-//  BREAK PARTICLES (empty pistol drop)
-// ============================================================================
 
 function spawnBreakParticles(x, y) {
     for (let i = 0; i < 20; i++) {
@@ -779,10 +706,6 @@ function spawnBreakParticles(x, y) {
     }
     playSound('spike');
 }
-
-// ============================================================================
-//  DROP & THROW (HOST)
-// ============================================================================
 
 function hostDropItem(playerId) {
     const player = players[playerId];
@@ -819,10 +742,10 @@ function hostDropItem(playerId) {
 
 function hostCheckHazardsForAllPlayers() {
     if (!isHost || currentEngineMode !== 'GAME') return;
+    if (matchPhase !== 'PLAY') return;
     for (let id in players) {
         const p = players[id];
         if (p.eliminated) continue;
-        // Check hazards
         for (let h of hazards) {
             if (checkCollision(p, h)) {
                 voidEliminateGame(p, 'touched a hazard');
@@ -830,7 +753,6 @@ function hostCheckHazardsForAllPlayers() {
             }
         }
     }
-    // void is already handled by checkVoidDeath() but call it again for safety
     checkVoidDeath();
 }
 
@@ -860,4 +782,390 @@ function hostThrowItem(playerId, angle, power = 14) {
     if (playerId === localPlayerId) localPlayerItem = null;
     broadcastToRoom('sync_players', { allPlayers: players });
     playSound('door');
+}
+
+// ============================================================================
+//  NEW PRE-MATCH DRAFTING LOGIC MECHANISMS
+// ============================================================================
+
+function initializePlacementPhase() {
+    matchPhase = 'CHOOSE';
+    const playerIds = Object.keys(players);
+    const totalCount = playerIds.length + 1;
+    placementPool = [];
+    playerSelectedBlock = {};
+    placementCursors = {};
+
+    playerIds.forEach(id => {
+        placementCursors[id] = { x: BASE_WIDTH / 2, y: BASE_HEIGHT / 2, confirmed: false };
+    });
+
+    for (let i = 0; i < totalCount; i++) {
+        const shapeTemplate = DRAFT_SHAPES[i % DRAFT_SHAPES.length];
+        const spacing = BASE_WIDTH / (totalCount + 1);
+        placementPool.push({
+            id: 'block_' + i,
+            type: shapeTemplate.type,
+            w: shapeTemplate.w,
+            h: shapeTemplate.h,
+            color: shapeTemplate.color,
+            blocks: shapeTemplate.blocks,
+            claimedBy: null,
+            menuX: spacing * (i + 1) - shapeTemplate.w / 2,
+            menuY: BASE_HEIGHT / 2 - shapeTemplate.h / 2
+        });
+    }
+}
+
+function updatePlacementPhases(dt) {
+    if (currentEngineMode !== 'GAME' || matchPhase === 'PLAY') return;
+
+    // Clamp dt to avoid huge movement steps
+    const maxDt = 0.033;
+    let safeDt = Math.min(dt, maxDt);
+    if (safeDt <= 0) safeDt = 0.016; // fallback
+
+    let cursor = placementCursors[localPlayerId];
+    if (!cursor) {
+        placementCursors[localPlayerId] = { x: BASE_WIDTH / 2, y: BASE_HEIGHT / 2, confirmed: false };
+        cursor = placementCursors[localPlayerId];
+    }
+    if (cursor.confirmed) return;
+
+    let moved = false;
+    const moveSpeed = 200; // units per second (was 400)
+    const step = moveSpeed * safeDt;
+
+    // Keyboard movement
+    if (keys.ArrowLeft || keys.KeyA) { cursor.x -= step; moved = true; }
+    if (keys.ArrowRight || keys.KeyD) { cursor.x += step; moved = true; }
+    if (keys.ArrowUp || keys.KeyW) { cursor.y -= step; moved = true; }
+    if (keys.Drop || keys.KeyS) { cursor.y += step; moved = true; }
+
+    // Mouse movement – only update when mouse actually moves, with smoothing
+    const mouseWorld = getMouseWorldPos();
+    let mouseMoved = false;
+    if (matchPhase === 'CHOOSE') {
+        const rect = canvas.getBoundingClientRect();
+        const screenX = (mousePos.x - rect.left) * (canvas.width / rect.width);
+        const screenY = (mousePos.y - rect.top) * (canvas.height / rect.height);
+        if (screenX >= 0 && screenX <= BASE_WIDTH && screenY >= 0 && screenY <= BASE_HEIGHT) {
+            cursor.x = screenX;
+            cursor.y = screenY;
+            moved = true;
+            mouseMoved = true;
+        }
+    } else if (matchPhase === 'PLACE') {
+        // Smooth mouse movement – avoid instant snapping
+        const targetX = mouseWorld.x;
+        const targetY = mouseWorld.y;
+        const smoothing = 0.85;
+        cursor.x = cursor.x * smoothing + targetX * (1 - smoothing);
+        cursor.y = cursor.y * smoothing + targetY * (1 - smoothing);
+        moved = true;
+        mouseMoved = true;
+    }
+
+    // Clamp position based on phase
+    if (matchPhase === 'CHOOSE') {
+        cursor.x = Math.max(0, Math.min(cursor.x, BASE_WIDTH));
+        cursor.y = Math.max(0, Math.min(cursor.y, BASE_HEIGHT));
+    } else {
+        cursor.x = Math.max(cameraBounds.minX, Math.min(cursor.x, cameraBounds.maxX));
+        cursor.y = Math.max(cameraBounds.minY, Math.min(cursor.y, cameraBounds.maxY));
+    }
+
+    if (moved) {
+        sendPlacementCursorUpdate(cursor.x, cursor.y);
+    }
+
+    // Handle placement / selection on click or E
+    if (keys.Interact || window.mouseJustClicked) {
+        if (keys.Interact) keys.Interact = false;
+        if (window.mouseJustClicked) window.mouseJustClicked = false;
+
+        if (matchPhase === 'CHOOSE') {
+            const item = placementPool.find(p =>
+                cursor.x >= p.menuX && cursor.x <= p.menuX + p.w &&
+                cursor.y >= p.menuY && cursor.y <= p.menuY + p.h &&
+                p.claimedBy === null
+            );
+            if (item) selectBlockRequest(item.id);
+        } else if (matchPhase === 'PLACE') {
+            const block = playerSelectedBlock[localPlayerId];
+            if (block) {
+                if (validatePlacement(cursor.x, cursor.y, block)) {
+                    confirmPlacementRequest(cursor.x, cursor.y);
+                } else {
+                    console.log("Placement overlaps map component or object!");
+                    playSound('spike');
+                }
+            }
+        }
+    }
+}
+
+function validatePlacement(x, y, block) {
+    const bx1 = x;
+    const by1 = y;
+    const bx2 = x + block.w;
+    const by2 = y + block.h;
+
+    if (bx1 < cameraBounds.minX || bx2 > cameraBounds.maxX || by1 < cameraBounds.minY || by2 > cameraBounds.maxY) {
+        return false;
+    }
+
+    for (let plat of platforms) {
+        if (bx1 < plat.x + plat.w && bx2 > plat.x && by1 < plat.y + plat.h && by2 > plat.y) {
+            return false;
+        }
+    }
+
+    for (let haz of hazards) {
+        if (bx1 < haz.x + haz.w && bx2 > haz.x && by1 < haz.y + haz.h && by2 > haz.y) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function sendPlacementCursorUpdate(cx, cy) {
+    if (isHost) {
+        placementCursors[localPlayerId].x = cx;
+        placementCursors[localPlayerId].y = cy;
+        broadcastToRoom('sync_placement_cursors', { cursors: placementCursors });
+    } else if (hostConnection?.open) {
+        hostConnection.send({
+            type: 'client_placement_cursor_update',
+            senderId: localPlayerId,
+            payload: { x: cx, y: cy }
+        });
+    }
+}
+
+function selectBlockRequest(blockId) {
+    if (isHost) {
+        handleHostBlockClaim(localPlayerId, blockId);
+    } else if (hostConnection?.open) {
+        hostConnection.send({
+            type: 'client_draft_claim',
+            senderId: localPlayerId,
+            payload: { itemId: blockId }
+        });
+    }
+}
+
+function confirmPlacementRequest(px, py) {
+    if (isHost) {
+        handleHostPlacementConfirm(localPlayerId, px, py);
+    } else if (hostConnection?.open) {
+        hostConnection.send({
+            type: 'client_confirm_placement',
+            senderId: localPlayerId,
+            payload: { x: px, y: py }
+        });
+    }
+}
+
+function handleHostBlockClaim(playerId, blockId) {
+    if (matchPhase !== 'CHOOSE') return;
+    const block = placementPool.find(b => b.id === blockId);
+    if (block && !block.claimedBy) {
+        block.claimedBy = playerId;
+        playerSelectedBlock[playerId] = block;
+        if (placementCursors[playerId]) placementCursors[playerId].confirmed = true;
+
+        broadcastToRoom('sync_placement_pool', { pool: placementPool, selections: playerSelectedBlock, cursors: placementCursors });
+
+        const allChosen = Object.keys(players).every(id => playerSelectedBlock[id] !== undefined);
+        if (allChosen) {
+            matchPhase = 'PLACE';
+            Object.keys(placementCursors).forEach(id => {
+                placementCursors[id].confirmed = false;
+                if (spawnPoints.length > 0) {
+                    placementCursors[id].x = spawnPoints[0].x;
+                    placementCursors[id].y = spawnPoints[0].y - 100;
+                } else {
+                    placementCursors[id].x = WORLD_WIDTH / 2;
+                    placementCursors[id].y = WORLD_HEIGHT / 2;
+                }
+            });
+            broadcastToRoom('transition_to_placement', { phase: 'PLACE', cursors: placementCursors });
+        }
+    }
+}
+
+function handleHostPlacementConfirm(playerId, px, py) {
+    if (matchPhase !== 'PLACE') return;
+    const block = playerSelectedBlock[playerId];
+    if (block && placementCursors[playerId] && !placementCursors[playerId].confirmed) {
+        if (validatePlacement(px, py, block)) {
+            platforms.push({
+                x: px,
+                y: py,
+                w: block.w,
+                h: block.h,
+                color: block.color,
+                isPlacedBlock: true
+            });
+            placementCursors[playerId].confirmed = true;
+
+            broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
+            broadcastToRoom('sync_placement_cursors', { cursors: placementCursors });
+
+            const allPlaced = Object.keys(players).every(id => placementCursors[id].confirmed);
+            if (allPlaced) {
+                matchPhase = 'PLAY';
+                broadcastToRoom('match_phase_play', { phase: 'PLAY' });
+                startOfficialMatchRun();
+            }
+        }
+    }
+}
+
+function startOfficialMatchRun() {
+    timerVal = 60;
+    if (gameTimer) clearInterval(gameTimer);
+    gameTimer = setInterval(() => {
+        timerVal--;
+        broadcastToRoom('sync_timer', { time: timerVal });
+        const timerEl = document.getElementById('timer');
+        if (timerEl) timerEl.innerText = timerVal;
+    }, 1000);
+    repositionAllPlayersToSpawnPoints();
+}
+
+function drawPlacementPhaseOverlay() {
+    if (currentEngineMode !== 'GAME' || matchPhase === 'PLAY') return;
+
+    if (matchPhase === 'CHOOSE') {
+        ctx.fillStyle = "rgba(12, 5, 22, 0.95)";
+        ctx.fillRect(0, 0, BASE_WIDTH, BASE_HEIGHT);
+
+        ctx.font = "bold 28px Orbitron";
+        ctx.fillStyle = "#00f2fe";
+        ctx.textAlign = "center";
+        ctx.fillText("CHOOSE YOUR OBJECT TO PLACE", BASE_WIDTH / 2, 100);
+        ctx.font = "16px Share Tech Mono";
+        ctx.fillStyle = "#aaa";
+        ctx.fillText("Use Mouse or WASD/Arrows + Click/E to draft an item", BASE_WIDTH / 2, 140);
+
+        placementPool.forEach(item => {
+            ctx.save();
+            if (item.claimedBy) {
+                ctx.fillStyle = "rgba(40, 40, 50, 0.5)";
+                ctx.fillRect(item.menuX, item.menuY, item.w, item.h);
+                ctx.strokeStyle = "#ff007f";
+                ctx.lineWidth = 2;
+                ctx.strokeRect(item.menuX, item.menuY, item.w, item.h);
+
+                ctx.font = "bold 12px Orbitron";
+                ctx.fillStyle = "#ff007f";
+                const claimer = players[item.claimedBy]?.nameTag || "TAKEN";
+                ctx.fillText(claimer, item.menuX + item.w / 2, item.menuY + item.h / 2 + 4);
+            } else {
+                ctx.fillStyle = item.color;
+                ctx.fillRect(item.menuX, item.menuY, item.w, item.h);
+                ctx.strokeStyle = "rgba(255,255,255,0.3)";
+                ctx.lineWidth = 2;
+                ctx.strokeRect(item.menuX, item.menuY, item.w, item.h);
+            }
+            ctx.restore();
+        });
+
+        for (let id in placementCursors) {
+            const cur = placementCursors[id];
+            const pColor = players[id]?.color || '#ffffff';
+            ctx.fillStyle = pColor;
+            ctx.beginPath();
+            ctx.arc(cur.x, cur.y, 10, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.font = "10px Orbitron";
+            ctx.fillStyle = "#fff";
+            ctx.fillText(players[id]?.nameTag || "Player", cur.x, cur.y - 15);
+
+            if (cur.confirmed) {
+                ctx.strokeStyle = "#00ff66";
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(cur.x, cur.y, 14, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+    } else if (matchPhase === 'PLACE') {
+        const localCur = placementCursors[localPlayerId];
+        if (localCur) {
+            // --- SMOOTH CAMERA FOLLOW ---
+            // Define a smoothing factor (lower = slower follow)
+            const CAM_LERP = 0.07;
+            // Calculate desired camera position (centered on cursor)
+            let targetCamX = localCur.x - BASE_WIDTH / 2;
+            let targetCamY = localCur.y - BASE_HEIGHT / 2;
+
+            // Use world dimensions as the absolute limit
+            const maxWorldCamX = WORLD_WIDTH - BASE_WIDTH;
+            const maxWorldCamY = WORLD_HEIGHT - BASE_HEIGHT;
+
+            targetCamX = Math.max(cameraBounds.minX, Math.min(targetCamX, maxWorldCamX));
+            targetCamY = Math.max(cameraBounds.minY, Math.min(targetCamY, maxWorldCamY));
+
+            // Apply linear interpolation for smooth movement
+            camera.x += (targetCamX - camera.x) * CAM_LERP;
+            camera.y += (targetCamY - camera.y) * CAM_LERP;
+
+            // Re‑clamp after interpolation to avoid edge overrun
+            camera.x = Math.max(cameraBounds.minX, Math.min(camera.x, cameraBounds.maxX - BASE_WIDTH));
+            camera.y = Math.max(cameraBounds.minY, Math.min(camera.y, cameraBounds.maxY - BASE_HEIGHT));
+        }
+
+        // Draw the world (platforms, etc.) with the current camera
+        ctx.save();
+        ctx.translate(-camera.x, -camera.y);
+
+        // Draw existing platforms, hazards, gems, etc. (optional: copy from your level drawing)
+        // For brevity, we assume you have a drawLevel() function, but here we just draw the block preview.
+
+        const myBlock = playerSelectedBlock[localPlayerId];
+        if (myBlock && localCur && !localCur.confirmed) {
+            const valid = validatePlacement(localCur.x, localCur.y, myBlock);
+            ctx.fillStyle = myBlock.color;
+            ctx.globalAlpha = valid ? 0.6 : 0.25;
+            ctx.fillRect(localCur.x, localCur.y, myBlock.w, myBlock.h);
+            ctx.strokeStyle = valid ? "#00ff66" : "#ff0000";
+            ctx.lineWidth = 3;
+            ctx.strokeRect(localCur.x, localCur.y, myBlock.w, myBlock.h);
+            ctx.globalAlpha = 1.0;
+        }
+
+        // Draw other players' cursors
+        for (let id in placementCursors) {
+            const cur = placementCursors[id];
+            const pColor = players[id]?.color || '#ffffff';
+            ctx.fillStyle = pColor;
+            ctx.beginPath();
+            ctx.arc(cur.x, cur.y, 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.font = "12px Orbitron";
+            ctx.fillStyle = "#fff";
+            ctx.fillText(players[id]?.nameTag || "Player", cur.x, cur.y - 12);
+            if (cur.confirmed) {
+                ctx.strokeStyle = "#00ff66";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(cur.x, cur.y, 12, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+        ctx.restore();
+
+        // UI text
+        ctx.font = "bold 24px Orbitron";
+        ctx.fillStyle = "#ffcc00";
+        ctx.textAlign = "center";
+        ctx.fillText("PLACE YOUR BLOCK ON THE MAP", BASE_WIDTH / 2, 50);
+        ctx.font = "14px Share Tech Mono";
+        ctx.fillStyle = "#ddd";
+        ctx.fillText("Cannot overlap existing components. Click or press E to place.", BASE_WIDTH / 2, 80);
+    }
 }

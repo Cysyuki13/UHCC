@@ -130,15 +130,10 @@ function setupHostRoutingRules(conn) {
                 if (players[pkg.senderId]) {
                     if (pkg.payload.resetVersion !== undefined && pkg.payload.resetVersion !== resetVersion) break;
                     const pl = players[pkg.senderId];
-
-                    // FIX: If the player is currently grabbed/pulled by someone else, 
-                    // DO NOT let their lagging client coordinates overwrite the host's pulling positions!
                     if (!pl.grabbedBy) {
                         pl.x = pkg.payload.x;
                         pl.y = pkg.payload.y;
                     }
-
-                    // Keep syncing the remaining values normally
                     pl.vx = pkg.payload.vx;
                     pl.vy = pkg.payload.vy;
                     pl.isGrounded = pkg.payload.isGrounded;
@@ -202,6 +197,64 @@ function setupHostRoutingRules(conn) {
             case 'request_throw_item':
                 if (players[pkg.senderId] && players[pkg.senderId].item)
                     hostThrowItem(pkg.senderId, pkg.payload.angle);
+                break;
+
+            // ==== DRAFT/PLACEMENT PHASE ADDITIONS – HOST ROUTING ====
+            case 'client_placement_cursor_update':
+                if (matchPhase === 'CHOOSE' || matchPhase === 'PLACE') {
+                    if (placementCursors[pkg.senderId]) {
+                        placementCursors[pkg.senderId].x = pkg.payload.x;
+                        placementCursors[pkg.senderId].y = pkg.payload.y;
+                    }
+                    broadcastToRoom('sync_placement_cursors', { cursors: placementCursors });
+                }
+                break;
+
+            case 'client_draft_claim':
+                if (matchPhase === 'CHOOSE') {
+                    const targetItem = placementPool.find(item => item.id === pkg.payload.itemId);
+                    if (targetItem && !targetItem.claimedBy) {
+                        targetItem.claimedBy = pkg.senderId;
+                        playerSelectedBlock[pkg.senderId] = targetItem;
+                        placementCursors[pkg.senderId].confirmed = true;
+                        broadcastToRoom('sync_placement_pool', { pool: placementPool, selections: playerSelectedBlock });
+                        if (Object.keys(players).every(id => placementCursors[id].confirmed)) {
+                            matchPhase = 'PLACE';
+                            Object.keys(placementCursors).forEach(id => placementCursors[id].confirmed = false);
+                            broadcastToRoom('transition_to_placement', { phase: 'PLACE' });
+                        }
+                    }
+                }
+                break;
+
+            case 'client_confirm_placement':
+                if (matchPhase === 'PLACE') {
+                    const block = playerSelectedBlock[pkg.senderId];
+                    if (block) {
+                        let collides = false;
+                        const px = pkg.payload.x;
+                        const py = pkg.payload.y;
+                        for (let plat of platforms) {
+                            if (px < plat.x + plat.w && px + block.w > plat.x && py < plat.y + plat.h && py + block.h > plat.y) {
+                                collides = true;
+                                break;
+                            }
+                        }
+                        if (!collides) {
+                            platforms.push({ x: px, y: py, w: block.w, h: block.h, color: block.color, isDynamicObject: true });
+                            placementCursors[pkg.senderId].confirmed = true;
+                            broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
+                            broadcastToRoom('sync_placement_cursors', { cursors: placementCursors });
+                            if (Object.keys(players).every(id => placementCursors[id].confirmed)) {
+                                matchPhase = 'PLAY';
+                                broadcastToRoom('match_phase_play', { phase: 'PLAY' });
+                                startOfficialMatchRun();
+                            }
+                        } else {
+                            conn.send({ type: 'placement_rejected', payload: { message: "Overlap detected!" } });
+                        }
+                    }
+                }
                 break;
         }
     });
@@ -279,8 +332,6 @@ function setupClientRoutingRules(conn) {
                 if (newVersion !== undefined && newVersion !== clientResetVersion) {
                     clientResetVersion = newVersion;
                 }
-
-                // Update other players
                 for (let id in pkg.payload.allPlayers) {
                     const data = pkg.payload.allPlayers[id];
                     if (id !== localPlayerId) {
@@ -306,11 +357,8 @@ function setupClientRoutingRules(conn) {
                         }
                     }
                 }
-
-                // Update local player
                 if (pkg.payload.allPlayers[localPlayerId]) {
                     const local = pkg.payload.allPlayers[localPlayerId];
-
                     if (isReset) {
                         players[localPlayerId].x = local.x;
                         players[localPlayerId].y = local.y;
@@ -327,15 +375,12 @@ function setupClientRoutingRules(conn) {
                         players[localPlayerId].eliminated = local.eliminated || false;
                         players[localPlayerId].deathReason = local.deathReason || null;
                         players[localPlayerId].grabbedBy = local.grabbedBy;
-
                         keys.ArrowLeft = false;
                         keys.ArrowRight = false;
                         keys.ArrowUp = false;
-
                         spectatorMode = false;
                         spectatorTargetId = null;
                         document.getElementById('spectator-controls')?.classList.add('hidden');
-
                         let initCamX = local.x - BASE_WIDTH / 2;
                         let initCamY = local.y - BASE_HEIGHT / 2;
                         let maxX = cameraBounds.maxX - BASE_WIDTH / camera.zoom;
@@ -344,10 +389,8 @@ function setupClientRoutingRules(conn) {
                         initCamY = Math.max(cameraBounds.minY, Math.min(initCamY, maxY));
                         camera.x = initCamX;
                         camera.y = initCamY;
-
                         players[localPlayerId].item = null;
                         localPlayerItem = null;
-
                         if (hostConnection && hostConnection.open) {
                             hostConnection.send({
                                 type: 'client_input_update',
@@ -366,7 +409,6 @@ function setupClientRoutingRules(conn) {
                             });
                         }
                     }
-
                     if (local.grabbedBy) {
                         players[localPlayerId].x = local.x;
                         players[localPlayerId].y = local.y;
@@ -378,7 +420,6 @@ function setupClientRoutingRules(conn) {
                         players[localPlayerId].handAngle = local.handAngle;
                         players[localPlayerId].grabbedBy = local.grabbedBy;
                     }
-
                     players[localPlayerId].grabbedBy = local.grabbedBy;
                     players[localPlayerId].score = local.score;
                     players[localPlayerId].color = local.color;
@@ -389,8 +430,6 @@ function setupClientRoutingRules(conn) {
                     players[localPlayerId].eliminated = local.eliminated || false;
                     players[localPlayerId].deathReason = local.deathReason || null;
                 }
-
-                // Reconstruct items for all players
                 for (let id in players) {
                     if (players[id].itemType === 'pistol') {
                         if (!players[id].item || players[id].item.constructor !== pistolItem) {
@@ -417,8 +456,6 @@ function setupClientRoutingRules(conn) {
                         players[id].item = null;
                     }
                 }
-
-                // --- CRITICAL FIX: Force local player's item to use host's ammo and cooldown ---
                 const localData = pkg.payload.allPlayers[localPlayerId];
                 if (players[localPlayerId] && players[localPlayerId].item && localData) {
                     if (players[localPlayerId].item.ammo !== undefined) {
@@ -427,12 +464,9 @@ function setupClientRoutingRules(conn) {
                     if (localData.itemCooldown !== undefined) {
                         players[localPlayerId].item.cooldown = localData.itemCooldown;
                     }
-                    // Also ensure the player's stored ammo matches
                     players[localPlayerId].ammo = localData.ammo;
                 }
                 localPlayerItem = players[localPlayerId] ? players[localPlayerId].item : null;
-                // --- END OF FIX ---
-
                 updateHudDisplays();
                 updateColorButtonStates();
                 break;
@@ -441,11 +475,9 @@ function setupClientRoutingRules(conn) {
             case 'sync_throwables':
                 throwables = pkg.payload.throwables;
                 break;
-
             case 'sync_robot_hands':
                 activeRobotHands = pkg.payload.activeRobotHands;
                 break;
-
             case 'sync_map':
                 platforms = pkg.payload.platforms;
                 hazards = pkg.payload.hazards;
@@ -457,52 +489,58 @@ function setupClientRoutingRules(conn) {
                     voidYThreshold = pkg.payload.voidYThreshold;
                 }
                 break;
-
             case 'sync_lobby_countdown':
                 lobbyCountdownVal = pkg.payload.value;
                 break;
-
             case 'sync_ready_players':
                 readyPlayers = pkg.payload.readyPlayers;
                 break;
-
             case 'sync_face_drawing':
                 localStorage.setItem('playerFaceDrawing_' + pkg.payload.playerId, pkg.payload.faceData);
                 localStorage.setItem('playerHasCustomFace_' + pkg.payload.playerId, 'true');
                 break;
-
             case 'trigger_match_start':
                 executeActiveMatchStart();
                 break;
-
             case 'sync_timer':
                 timerVal = pkg.payload.time;
                 document.getElementById('timer').innerText = timerVal;
                 break;
-
             case 'match_over':
                 executeMatchEndingSequence(pkg.payload.summary);
                 break;
-
             case 'return_to_lobby':
                 executeLobbyReturnSequence();
                 break;
-
             case 'sync_race_start':
                 raceCountdownVal = pkg.payload.raceCountdownVal;
                 firstPlayerFinishTime = Date.now();
                 break;
-
             case 'sync_race_countdown':
                 raceCountdownVal = pkg.payload.value;
                 break;
-
             case 'sync_world_items':
                 if (itemManager) itemManager.syncFromData(pkg.payload.items);
                 break;
-
             case 'sync_projectiles':
                 projectiles = pkg.payload.projectiles;
+                break;
+
+            case 'sync_placement_cursors':
+                placementCursors = pkg.payload.cursors;
+                break;
+            case 'sync_placement_pool':
+                placementPool = pkg.payload.pool;
+                playerSelectedBlock = pkg.payload.selections;
+                break;
+            case 'transition_to_placement':
+                matchPhase = pkg.payload.phase;
+                break;
+            case 'match_phase_play':
+                matchPhase = pkg.payload.phase;
+                break;
+            case 'placement_rejected':
+                console.warn("Invalid position: " + pkg.payload.message);
                 break;
         }
     });
@@ -657,8 +695,79 @@ function evaluateLobbyDoorTrigger() {
     }
 }
 
+// ============================================================================
+//  READY TOGGLE VIA R KEY
+// ============================================================================
+function toggleReadyStatus() {
+    if (!players[localPlayerId]) return;
+    if (currentEngineMode !== 'LOBBY') return;
+
+    if (readyPlayers[localPlayerId]) {
+        delete readyPlayers[localPlayerId];
+    } else {
+        readyPlayers[localPlayerId] = true;
+    }
+    if (!isHost && hostConnection?.open) {
+        hostConnection.send({
+            type: 'player_ready_toggle',
+            senderId: localPlayerId,
+            payload: { isReady: !!readyPlayers[localPlayerId] }
+        });
+    } else if (isHost) {
+        broadcastToRoom('sync_ready_players', { readyPlayers });
+    }
+    playSound('door');
+}
+
+// ============================================================================
+//  MATCH END HELPERS (IMMEDIATE END WHEN FINISHER + ALL OTHERS ELIMINATED)
+// ============================================================================
+function allPlayersFinishedOrEliminated() {
+    for (let id in players) {
+        const p = players[id];
+        if (!p.finished && !p.eliminated) return false;
+    }
+    return true;
+}
+
+function finalizeMatchAndEnd() {
+    if (!isHost || currentEngineMode !== 'GAME') return;
+    if (matchEndingInProgress) return;
+    matchEndingInProgress = true;
+
+    if (gameTimer) clearInterval(gameTimer);
+    if (raceTimerId) clearInterval(raceTimerId);
+    raceTimerId = null;
+    gameTimer = null;
+
+    // Give points based on finish order (only for finished players)
+    const finishedList = finishPositions.slice();
+    const points = [3, 2, 1];
+    for (let i = 0; i < finishedList.length && i < points.length; i++) {
+        const pid = finishedList[i];
+        if (players[pid]) players[pid].score += points[i];
+    }
+
+    let results = [];
+    for (let id in players) {
+        results.push({
+            id,
+            nameTag: players[id].nameTag,
+            score: players[id].score,
+            position: finishPositions.indexOf(id) + 1 || -1
+        });
+    }
+
+    broadcastToRoom('match_over', { summary: results });
+    executeMatchEndingSequence(results);
+}
+
+// ============================================================================
+//  MODIFIED MATCH START (INTEGRATES DRAFT/PLACEMENT PHASE)
+// ============================================================================
 function executeActiveMatchStart() {
     currentEngineMode = 'GAME';
+    matchPhase = 'CHOOSE';
     readyPlayers = {};
 
     const selectedMap = MAPS[currentSelectedMapName];
@@ -685,7 +794,7 @@ function executeActiveMatchStart() {
     }
 
     updateHudDisplays();
-    raceStarted = true;
+    raceStarted = false;
     firstPlayerFinishTime = -1;
     raceCountdownVal = -1;
     finishPositions = [];
@@ -698,15 +807,35 @@ function executeActiveMatchStart() {
     lastProjectileSnapshot = null;
     lastRobotHandSnapshot = null;
 
-    const sp = spawnPoints[0];
+    const totalPlayers = Object.keys(players).length;
+    placementPool = [];
+    playerSelectedBlock = {};
+    placementCursors = {};
+
+    for (let i = 0; i < totalPlayers + 1; i++) {
+        const template = DRAFT_SHAPES[i % DRAFT_SHAPES.length];
+        placementPool.push({
+            id: 'item_' + i,
+            type: template.type,
+            w: template.w,
+            h: template.h,
+            color: template.color,
+            blocks: template.blocks,
+            claimedBy: null,
+            menuX: 150 + (i * 200) % (BASE_WIDTH - 300),
+            menuY: 250 + Math.floor((i * 200) / (BASE_WIDTH - 300)) * 160
+        });
+    }
+
     for (let id in players) {
-        players[id].x = sp.x;
-        players[id].y = sp.y;
+        placementCursors[id] = { x: BASE_WIDTH / 2, y: BASE_HEIGHT / 2, confirmed: false };
+        players[id].eliminated = false;
+        players[id].x = spawnPoints[0].x;
+        players[id].y = spawnPoints[0].y;
         players[id].vx = 0;
         players[id].vy = 0;
         players[id].finished = false;
         players[id].finishTime = -1;
-        players[id].eliminated = false;
         players[id].deathReason = null;
         players[id].knockbackTimer = 0;
         players[id].knockbackVx = 0;
@@ -724,43 +853,58 @@ function executeActiveMatchStart() {
     matchEndingInProgress = false;
 
     if (isHost) {
-        timerVal = 60;
-        if (gameTimer) clearInterval(gameTimer);
-        gameTimer = setInterval(() => {
-            timerVal--;
-            broadcastToRoom('sync_timer', { time: timerVal });
-            document.getElementById('timer').innerText = timerVal;
-
-            if (timerVal <= 0) {
-                clearInterval(gameTimer);
-                gameTimer = null;
-                if (raceTimerId) {
-                    clearInterval(raceTimerId);
-                    raceTimerId = null;
-                }
-                let results = [];
-                for (let id in players) {
-                    results.push({ id, nameTag: players[id].nameTag, score: players[id].score });
-                }
-                broadcastToRoom('match_over', { summary: results });
-                executeMatchEndingSequence(results);
-            }
-        }, 1000);
+        broadcastToRoom('sync_placement_pool', { pool: placementPool, selections: playerSelectedBlock });
+        broadcastToRoom('sync_placement_cursors', { cursors: placementCursors });
     }
 
-    console.log("%c[UHCC] Match started with map: " + currentSelectedMapName, "color: #00f2fe; font-weight: bold;");
+    console.log("%c[UHCC] Match started with DRAFT phase. Map: " + currentSelectedMapName, "color: #00f2fe; font-weight: bold;");
     updateScoreboardButtonVisibility();
 }
 
+// ===== Host only: start actual gameplay after placement =====
+function startOfficialMatchRun() {
+    if (!isHost) return;
+    timerVal = 60;
+    if (gameTimer) clearInterval(gameTimer);
+    gameTimer = setInterval(() => {
+        timerVal--;
+        broadcastToRoom('sync_timer', { time: timerVal });
+        document.getElementById('timer').innerText = timerVal;
+
+        if (timerVal <= 0) {
+            clearInterval(gameTimer);
+            gameTimer = null;
+            if (raceTimerId) {
+                clearInterval(raceTimerId);
+                raceTimerId = null;
+            }
+            let results = [];
+            for (let id in players) {
+                results.push({ id, nameTag: players[id].nameTag, score: players[id].score });
+            }
+            broadcastToRoom('match_over', { summary: results });
+            executeMatchEndingSequence(results);
+        }
+    }, 1000);
+    raceStarted = true;
+    repositionAllPlayersToSpawnPoints();
+    console.log("[UHCC] Placement phase completed. Gameplay started.");
+}
+
+// ============================================================================
+//  RACE FINISH & EARLY END LOGIC
+// ============================================================================
 function checkAndProcessRaceFinish() {
     if (!isHost || currentEngineMode !== 'GAME' || !raceStarted) return;
     for (let id in players) {
         const pl = players[id];
         if (pl.eliminated || pl.finished) continue;
         if (!checkCollision(pl, finishLine)) continue;
+
         pl.finished = true;
         pl.finishTime = Date.now();
         finishPositions.push(id);
+
         if (firstPlayerFinishTime === -1) {
             firstPlayerFinishTime = Date.now();
             raceCountdownVal = 30;
@@ -773,17 +917,19 @@ function checkAndProcessRaceFinish() {
                 if (raceCountdownVal <= 0) {
                     clearInterval(raceTimerId);
                     raceTimerId = null;
-                    let points = [3, 2, 1];
-                    for (let i = 0; i < Math.min(finishPositions.length, 3); i++)
-                        if (players[finishPositions[i]]) players[finishPositions[i]].score += points[i];
-                    if (gameTimer) clearInterval(gameTimer);
-                    gameTimer = null;
-                    let results = [];
-                    for (let id in players) results.push({ id, nameTag: players[id].nameTag, score: players[id].score, position: finishPositions.indexOf(id) + 1 || -1 });
-                    broadcastToRoom('match_over', { summary: results });
-                    executeMatchEndingSequence(results);
+                    finalizeMatchAndEnd();
                 }
             }, 1000);
+        }
+
+        // If all players are now either finished or eliminated, end immediately
+        if (allPlayersFinishedOrEliminated()) {
+            if (raceTimerId) {
+                clearInterval(raceTimerId);
+                raceTimerId = null;
+            }
+            finalizeMatchAndEnd();
+            break;
         }
     }
 }
@@ -963,10 +1109,6 @@ function resolvePlayerCollisions() {
     }
 }
 
-// ============================================================================
-//  KNOCKBACK PRIORITY (overrides movement, dash, jump)
-// ============================================================================
-
 function resolvePlatformCollision(player) {
     for (let plat of platforms) {
         if (player.x < plat.x + plat.w && player.x + player.width > plat.x &&
@@ -1001,18 +1143,19 @@ function resolvePlatformCollision(player) {
     }
 }
 
+// ============================================================================
+//  UPDATE CHARACTER PHYSICS – FIX: finished players cannot move
+// ============================================================================
 function updateCharacterPhysics(player, dt) {
     if (player.eliminated) return;
+    if (player.finished) return; // 👈 new: finished players can't move
 
-    // --- FIX FOR PISTOL SINGLE-SHOOT & AMMO DESYNC ---
-    // This updates item cooldowns every frame and syncs ammo data back to the player object
     if (player.item) {
         if (typeof player.item.update === 'function') {
             player.item.update(dt);
         }
         player.ammo = player.item.ammo;
     }
-    // -------------------------------------------------
 
     if (player.grabbedBy) {
         player.vx = 0;
@@ -1033,6 +1176,7 @@ function updateCharacterPhysics(player, dt) {
             player.knockbackVy = 0;
         }
         isKnockedBack = true;
+        player.x += player.vx * dt * 2;
     }
 
     if (!isKnockedBack) {
@@ -1279,7 +1423,7 @@ function respawnMatchEntity(player) {
 }
 
 // ============================================================================
-//  PARTICLES
+//  PARTICLES (unchanged)
 // ============================================================================
 
 const PARTICLE_CAP = 250;
@@ -1390,7 +1534,7 @@ function updateParticles(dt) {
 }
 
 // ============================================================================
-//  RENDERING
+//  RENDERING (includes new Draft/Placement overlay)
 // ============================================================================
 
 function drawParticles() {
@@ -1442,7 +1586,6 @@ function drawLobbyScoreboard() {
     });
 }
 
-// Robot hand stretched parts (global, used in drawCanvasLevelLayout)
 let robotHandBaseImg = new Image();
 robotHandBaseImg.src = 'assets/items/robot_hand_base.svg';
 let robotHandArmImg = new Image();
@@ -1915,7 +2058,7 @@ function saveSettings() {
 }
 
 // ============================================================================
-//  MAIN GAME LOOP (with camera bounds)
+//  MAIN GAME LOOP (with placement phase hooks)
 // ============================================================================
 
 function enginePipelineTick(timestamp) {
@@ -1937,79 +2080,85 @@ function enginePipelineTick(timestamp) {
             checkAllPlayersEliminatedAndEndMatch();
         }
 
-        if (localPlayer && !spectatorMode) {
-            updateCharacterPhysics(localPlayer, dt);
-            resolvePlayerCollisions();
-            if (currentEngineMode === 'GAME' && isHost) checkAndProcessRaceFinish();
-            if (isHost) {
-                evaluateLobbyDoorTrigger();
-                localPlayer.handAngle = calculateHandAngle(localPlayer);
-                broadcastToRoom('sync_players', { allPlayers: players });
-            } else {
-                if (!localPlayer.grabbedBy) {
-                    hostConnection.send({
-                        type: 'client_input_update', senderId: localPlayerId,
-                        payload: {
-                            x: localPlayer.x, y: localPlayer.y, vx: localPlayer.vx, vy: localPlayer.vy,
-                            isGrounded: localPlayer.isGrounded, facingRight: localPlayer.facingRight,
-                            isDashing: localPlayer.isDashing, handAngle: calculateHandAngle(localPlayer),
-                            resetVersion: clientResetVersion
-                        }
-                    });
-                }
-            }
+        updatePlacementPhases(dt);
 
-            if (itemManager) {
-                itemManager.update();
-                if (isHost && localPlayer) {
-                    const picked = itemManager.checkPickup(localPlayer);
-                    if (picked) {
-                        players[localPlayerId].item = picked;
-                        players[localPlayerId].itemType = picked.name === 'pistol' ? 'pistol' : 'robot_hand';
-                        players[localPlayerId].ammo = picked.ammo;
-                        localPlayerItem = picked;
-                        broadcastToRoom('sync_players', { allPlayers: players });
-                        broadcastWorldItems();
-                        playSound('gem');
+        if (matchPhase === 'PLAY') {
+            if (localPlayer && !spectatorMode) {
+                updateCharacterPhysics(localPlayer, dt);
+                resolvePlayerCollisions();
+                if (currentEngineMode === 'GAME' && isHost) checkAndProcessRaceFinish();
+                if (isHost) {
+                    evaluateLobbyDoorTrigger();
+                    localPlayer.handAngle = calculateHandAngle(localPlayer);
+                    broadcastToRoom('sync_players', { allPlayers: players });
+                } else {
+                    if (!localPlayer.grabbedBy) {
+                        hostConnection.send({
+                            type: 'client_input_update', senderId: localPlayerId,
+                            payload: {
+                                x: localPlayer.x, y: localPlayer.y, vx: localPlayer.vx, vy: localPlayer.vy,
+                                isGrounded: localPlayer.isGrounded, facingRight: localPlayer.facingRight,
+                                isDashing: localPlayer.isDashing, handAngle: calculateHandAngle(localPlayer),
+                                resetVersion: clientResetVersion
+                            }
+                        });
                     }
-                } else if (!isHost && localPlayer) {
-                    for (let wi of itemManager.worldItems) {
-                        if (wi.isAvailable && checkCollision(localPlayer, wi)) {
-                            hostConnection.send({ type: 'request_pickup_item', senderId: localPlayerId });
-                            break;
+                }
+
+                if (itemManager) {
+                    itemManager.update();
+                    if (isHost && localPlayer) {
+                        const picked = itemManager.checkPickup(localPlayer);
+                        if (picked) {
+                            players[localPlayerId].item = picked;
+                            players[localPlayerId].itemType = picked.name === 'pistol' ? 'pistol' : 'robot_hand';
+                            players[localPlayerId].ammo = picked.ammo;
+                            localPlayerItem = picked;
+                            broadcastToRoom('sync_players', { allPlayers: players });
+                            broadcastWorldItems();
+                            playSound('gem');
+                        }
+                    } else if (!isHost && localPlayer && !localPlayer.item) {
+                        for (let wi of itemManager.worldItems) {
+                            if (wi.isAvailable && checkCollision(localPlayer, wi)) {
+                                hostConnection.send({ type: 'request_pickup_item', senderId: localPlayerId });
+                                playSound('gem');
+                                break;
+                            }
                         }
                     }
                 }
-            }
-            if (keys.Drop && !wasDropPressed) {
-                if (localPlayer.item) {
-                    if (!isHost && hostConnection?.open) {
-                        if (localPlayer.item.ammo !== undefined && localPlayer.item.ammo === 0) {
-                            spawnBreakParticles(localPlayer.x + localPlayer.width / 2, localPlayer.y + localPlayer.height / 2);
-                            localPlayer.item = null;
-                            localPlayer.itemType = null;
-                            localPlayer.ammo = 0;
-                            localPlayerItem = null;
+                if (keys.Drop && !wasDropPressed) {
+                    if (localPlayer.item) {
+                        if (!isHost && hostConnection?.open) {
+                            if (localPlayer.item.ammo !== undefined && localPlayer.item.ammo === 0) {
+                                spawnBreakParticles(localPlayer.x + localPlayer.width / 2, localPlayer.y + localPlayer.height / 2);
+                                localPlayer.item = null;
+                                localPlayer.itemType = null;
+                                localPlayer.ammo = 0;
+                                localPlayerItem = null;
+                            }
+                            hostConnection.send({ type: 'request_drop_item', senderId: localPlayerId });
+                        } else if (isHost) {
+                            hostDropItem(localPlayerId);
                         }
-                        hostConnection.send({ type: 'request_drop_item', senderId: localPlayerId });
-                    } else if (isHost) {
-                        hostDropItem(localPlayerId);
                     }
                 }
-            }
-            wasDropPressed = keys.Drop;
-            if (localPlayerItem) localPlayerItem.update(dt);
-        } else if (localPlayer && spectatorMode) {
-            if (spectatorTargetId && players[spectatorTargetId]) {
-                updateCameraToTarget();
-            } else {
-                const alive = getAlivePlayers();
-                if (alive.length > 0) {
-                    spectatorTargetId = alive[0].id;
+                wasDropPressed = keys.Drop;
+                if (localPlayerItem) localPlayerItem.update(dt);
+            } else if (localPlayer && spectatorMode) {
+                if (spectatorTargetId && players[spectatorTargetId]) {
                     updateCameraToTarget();
+                } else {
+                    const alive = getAlivePlayers();
+                    if (alive.length > 0) {
+                        spectatorTargetId = alive[0].id;
+                        updateCameraToTarget();
+                    }
                 }
             }
         }
+
         camera.zoom += (camera.targetZoom - camera.zoom) * 0.1 * dt;
         if (!spectatorMode && players[localPlayerId]) {
             let targetCamX = (players[localPlayerId].x + players[localPlayerId].width / 2) - (BASE_WIDTH / 2) / camera.zoom;
@@ -2024,369 +2173,349 @@ function enginePipelineTick(timestamp) {
             camera.y += (targetCamY - camera.y) * 0.1 * dt;
         }
 
-        // bullets
-        for (let i = 0; i < projectiles.length; i++) {
-            const p = projectiles[i];
-            p.x += p.vx * dt;
-            p.y += p.vy * dt;
-            p.life -= dt;
-            if (p.life <= 0) {
-                projectiles.splice(i, 1);
-                i--;
-                continue;
-            }
-            const out = p.x + p.radius < 0 || p.x - p.radius > WORLD_WIDTH ||
-                p.y + p.radius < 0 || p.y - p.radius > WORLD_HEIGHT;
-            if (out) {
-                for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 });
-                projectiles.splice(i, 1);
-                i--;
-                continue;
-            }
-            let solid = false;
-            for (let plat of platforms) if (p.x + p.radius > plat.x && p.x - p.radius < plat.x + plat.w && p.y + p.radius > plat.y && p.y - p.radius < plat.y + plat.h) { solid = true; break; }
-            if (solid) {
-                for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 });
-                projectiles.splice(i, 1);
-                i--;
-                continue;
-            }
-            for (let h of hazards) if (p.x + p.radius > h.x && p.x - p.radius < h.x + h.w && p.y + p.radius > h.y && p.y - p.radius < h.y + h.h) { solid = true; break; }
-            if (solid) {
-                for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 });
-                projectiles.splice(i, 1);
-                i--;
-                continue;
-            }
-            for (let id in players) {
-                if (id === p.ownerId) continue;
-                const t = players[id];
-                if (t.eliminated) continue;
-                const dx = p.x - (t.x + t.width / 2);
-                const dy = p.y - (t.y + t.height / 2);
-                if (Math.hypot(dx, dy) < p.radius + t.width / 2) {
-                    const angle = Math.atan2(p.vy, p.vx);
-                    t.knockbackTimer = 0.25;
-                    t.knockbackVx = Math.cos(angle) * p.knockback;
-                    t.knockbackVy = Math.sin(angle) * p.knockback;
+        if (matchPhase === 'PLAY') {
+            for (let i = 0; i < projectiles.length; i++) {
+                const p = projectiles[i];
+                p.x += p.vx * dt;
+                p.y += p.vy * dt;
+                p.life -= dt;
+                if (p.life <= 0) {
                     projectiles.splice(i, 1);
                     i--;
-                    playSound('spike');
-                    break;
+                    continue;
+                }
+                const out = p.x + p.radius < 0 || p.x - p.radius > WORLD_WIDTH ||
+                    p.y + p.radius < 0 || p.y - p.radius > WORLD_HEIGHT;
+                if (out) {
+                    for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 });
+                    projectiles.splice(i, 1);
+                    i--;
+                    continue;
+                }
+                let solid = false;
+                for (let plat of platforms) if (p.x + p.radius > plat.x && p.x - p.radius < plat.x + plat.w && p.y + p.radius > plat.y && p.y - p.radius < plat.y + plat.h) { solid = true; break; }
+                if (solid) {
+                    for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 });
+                    projectiles.splice(i, 1);
+                    i--;
+                    continue;
+                }
+                for (let h of hazards) if (p.x + p.radius > h.x && p.x - p.radius < h.x + h.w && p.y + p.radius > h.y && p.y - p.radius < h.y + h.h) { solid = true; break; }
+                if (solid) {
+                    for (let s = 0; s < 3; s++) particles.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 0.3, age: 0, size: Math.random() * 2 + 1, color: '#ffaa44', alpha: 1 });
+                    projectiles.splice(i, 1);
+                    i--;
+                    continue;
+                }
+                for (let id in players) {
+                    if (id === p.ownerId) continue;
+                    const t = players[id];
+                    if (t.eliminated) continue;
+                    const dx = p.x - (t.x + t.width / 2);
+                    const dy = p.y - (t.y + t.height / 2);
+                    if (Math.hypot(dx, dy) < p.radius + t.width / 2) {
+                        const angle = Math.atan2(p.vy, p.vx);
+                        t.knockbackTimer = 0.25;
+                        t.knockbackVx = Math.cos(angle) * p.knockback;
+                        t.knockbackVy = Math.sin(angle) * p.knockback;
+                        projectiles.splice(i, 1);
+                        i--;
+                        playSound('spike');
+                        break;
+                    }
                 }
             }
-        }
 
-        // Robot hand updates (host only)
-        if (isHost && (currentEngineMode === 'GAME' || currentEngineMode === 'LOBBY')) {
-            for (let i = 0; i < activeRobotHands.length; i++) {
-                const grab = activeRobotHands[i];
-                const holder = players[grab.holderId];
-
-                if (!holder || holder.eliminated) {
-                    if (grab.targetId && players[grab.targetId]) {
-                        players[grab.targetId].grabbedBy = null;
-                        broadcastToRoom('sync_players', { allPlayers: players });
-                    }
-                    activeRobotHands.splice(i, 1);
-                    i--;
-                    continue;
-                }
-
-                const now = Date.now();
-                if (!grab._lastProgressTime) {
-                    grab._lastProgressTime = now;
-                    grab._lastProgress = grab.progress;
-                } else if (now - grab._lastProgressTime > 2000 && Math.abs(grab.progress - grab._lastProgress) < 0.01) {
-                    console.warn(`[RobotHand] Grab stuck for >2s, force removing. Holder: ${grab.holderId}, progress: ${grab.progress}`);
-                    if (grab.targetId && players[grab.targetId]) {
-                        players[grab.targetId].grabbedBy = null;
-                    }
-                    activeRobotHands.splice(i, 1);
-                    i--;
-                    continue;
-                } else {
-                    if (now - grab._lastProgressTime > 500) {
-                        grab._lastProgressTime = now;
-                        grab._lastProgress = grab.progress;
-                    }
-                }
-
-                const MAX_LENGTH = 400;
-                const EXTEND_SPEED = 20;
-                const RETRACT_SPEED = EXTEND_SPEED + 10;
-
-                const handX = holder.x + holder.width / 2;
-                const handY = holder.y + 32;
-
-                if (grab.direction === 1) {
-                    const oldProgress = grab.progress;
-                    grab.progress += (EXTEND_SPEED * dt) / MAX_LENGTH;
-
-                    if (grab.progress >= 1) {
-                        grab.progress = 1;
-                        grab.direction = -1;
-                    } else {
-                        const tipX = handX + Math.cos(grab.angle) * MAX_LENGTH * grab.progress;
-                        const tipY = handY + Math.sin(grab.angle) * MAX_LENGTH * grab.progress;
-                        for (let id in players) {
-                            if (id === grab.holderId) continue;
-                            const target = players[id];
-                            if (target.eliminated) continue;
-                            const targetCenterX = target.x + target.width / 2;
-                            const targetCenterY = target.y + target.height / 2;
-                            const dx = tipX - targetCenterX;
-                            const dy = tipY - targetCenterY;
-                            const dist = Math.hypot(dx, dy);
-                            if (dist < 25 + target.width / 2) {
-                                grab.targetId = id;
-                                grab.direction = -1;
-                                target.grabbedBy = grab.holderId;
-                                const grabOffsetY = -3;
-                                target.x = tipX - target.width / 2;
-                                target.y = tipY - target.height / 2 + grabOffsetY;
-                                target.vx = 0;
-                                target.vy = 0;
-                                target.isGrounded = false;
-                                resolvePlatformCollision(target);
-                                playSound('door');
-                                broadcastToRoom('sync_players', { allPlayers: players });
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if (grab.direction === -1) {
-                    const oldProgress = grab.progress;
-                    grab.progress -= (RETRACT_SPEED * dt) / MAX_LENGTH;
-
-                    if (grab.progress <= 0) {
+            if (isHost && (currentEngineMode === 'GAME' || currentEngineMode === 'LOBBY')) {
+                for (let i = 0; i < activeRobotHands.length; i++) {
+                    const grab = activeRobotHands[i];
+                    const holder = players[grab.holderId];
+                    if (!holder || holder.eliminated) {
                         if (grab.targetId && players[grab.targetId]) {
-                            const target = players[grab.targetId];
-                            const angleToHolder = Math.atan2(handY - target.y, handX - target.x);
-                            target.vx += Math.cos(angleToHolder) * 20;
-                            target.vy += Math.sin(angleToHolder) * 20;
-                            target.grabbedBy = null;
-                            target.isGrounded = false;
-                            resolvePlatformCollision(target);
+                            players[grab.targetId].grabbedBy = null;
                             broadcastToRoom('sync_players', { allPlayers: players });
                         }
                         activeRobotHands.splice(i, 1);
+                        i--;
                         continue;
                     }
-
-                    if (grab.targetId && players[grab.targetId]) {
-                        const target = players[grab.targetId];
-                        const pulled = (oldProgress - grab.progress) * MAX_LENGTH;
-                        const angle = Math.atan2(handY - target.y, handX - target.x);
-
-                        let newX = target.x + Math.cos(angle) * pulled;
-                        let newY = target.y + Math.sin(angle) * pulled;
-                        const grabOffsetY = -5;
-                        newY += grabOffsetY;
-                        newX = Math.max(0, Math.min(WORLD_WIDTH - target.width, newX));
-                        newY = Math.max(0, Math.min(WORLD_HEIGHT - target.height, newY));
-
-                        target.x = newX;
-                        target.y = newY;
-                        target.vx = 0;
-                        target.vy = 0;
-                        target.isGrounded = false;
-
-                        resolvePlatformCollision(target);
-                        for (let plat of platforms) {
-                            if (target.x < plat.x + plat.w && target.x + target.width > plat.x &&
-                                target.y + target.height > plat.y && target.y < plat.y + plat.h) {
-                                if (target.vy <= 0 && target.y + target.height - plat.y < 15) {
-                                    target.y = plat.y - target.height;
-                                    target.isGrounded = true;
+                    const now = Date.now();
+                    if (!grab._lastProgressTime) {
+                        grab._lastProgressTime = now;
+                        grab._lastProgress = grab.progress;
+                    } else if (now - grab._lastProgressTime > 2000 && Math.abs(grab.progress - grab._lastProgress) < 0.01) {
+                        console.warn(`[RobotHand] Grab stuck for >2s, force removing. Holder: ${grab.holderId}, progress: ${grab.progress}`);
+                        if (grab.targetId && players[grab.targetId]) {
+                            players[grab.targetId].grabbedBy = null;
+                        }
+                        activeRobotHands.splice(i, 1);
+                        i--;
+                        continue;
+                    } else {
+                        if (now - grab._lastProgressTime > 500) {
+                            grab._lastProgressTime = now;
+                            grab._lastProgress = grab.progress;
+                        }
+                    }
+                    const MAX_LENGTH = 400;
+                    const EXTEND_SPEED = 20;
+                    const RETRACT_SPEED = EXTEND_SPEED + 10;
+                    const handX = holder.x + holder.width / 2;
+                    const handY = holder.y + 32;
+                    if (grab.direction === 1) {
+                        const oldProgress = grab.progress;
+                        grab.progress += (EXTEND_SPEED * dt) / MAX_LENGTH;
+                        if (grab.progress >= 1) {
+                            grab.progress = 1;
+                            grab.direction = -1;
+                        } else {
+                            const tipX = handX + Math.cos(grab.angle) * MAX_LENGTH * grab.progress;
+                            const tipY = handY + Math.sin(grab.angle) * MAX_LENGTH * grab.progress;
+                            for (let id in players) {
+                                if (id === grab.holderId) continue;
+                                const target = players[id];
+                                if (target.eliminated) continue;
+                                const targetCenterX = target.x + target.width / 2;
+                                const targetCenterY = target.y + target.height / 2;
+                                const dx = tipX - targetCenterX;
+                                const dy = tipY - targetCenterY;
+                                const dist = Math.hypot(dx, dy);
+                                if (dist < 25 + target.width / 2) {
+                                    grab.targetId = id;
+                                    grab.direction = -1;
+                                    target.grabbedBy = grab.holderId;
+                                    const grabOffsetY = -3;
+                                    target.x = tipX - target.width / 2;
+                                    target.y = tipY - target.height / 2 + grabOffsetY;
+                                    target.vx = 0;
+                                    target.vy = 0;
+                                    target.isGrounded = false;
+                                    resolvePlatformCollision(target);
+                                    playSound('door');
+                                    broadcastToRoom('sync_players', { allPlayers: players });
+                                    break;
                                 }
                             }
                         }
                     }
+                    if (grab.direction === -1) {
+                        const oldProgress = grab.progress;
+                        grab.progress -= (RETRACT_SPEED * dt) / MAX_LENGTH;
+                        if (grab.progress <= 0) {
+                            if (grab.targetId && players[grab.targetId]) {
+                                const target = players[grab.targetId];
+                                const angleToHolder = Math.atan2(handY - target.y, handX - target.x);
+                                target.vx += Math.cos(angleToHolder) * 20;
+                                target.vy += Math.sin(angleToHolder) * 20;
+                                target.grabbedBy = null;
+                                target.isGrounded = false;
+                                resolvePlatformCollision(target);
+                                broadcastToRoom('sync_players', { allPlayers: players });
+                            }
+                            activeRobotHands.splice(i, 1);
+                            continue;
+                        }
+                        if (grab.targetId && players[grab.targetId]) {
+                            const target = players[grab.targetId];
+                            const pulled = (oldProgress - grab.progress) * MAX_LENGTH;
+                            const angle = Math.atan2(handY - target.y, handX - target.x);
+                            let newX = target.x + Math.cos(angle) * pulled;
+                            let newY = target.y + Math.sin(angle) * pulled;
+                            const grabOffsetY = -5;
+                            newY += grabOffsetY;
+                            newX = Math.max(0, Math.min(WORLD_WIDTH - target.width, newX));
+                            newY = Math.max(0, Math.min(WORLD_HEIGHT - target.height, newY));
+                            target.x = newX;
+                            target.y = newY;
+                            target.vx = 0;
+                            target.vy = 0;
+                            target.isGrounded = false;
+                            resolvePlatformCollision(target);
+                            for (let plat of platforms) {
+                                if (target.x < plat.x + plat.w && target.x + target.width > plat.x &&
+                                    target.y + target.height > plat.y && target.y < plat.y + plat.h) {
+                                    if (target.vy <= 0 && target.y + target.height - plat.y < 15) {
+                                        target.y = plat.y - target.height;
+                                        target.isGrounded = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    const tipX = handX + Math.cos(grab.angle) * MAX_LENGTH * grab.progress;
+                    const tipY = handY + Math.sin(grab.angle) * MAX_LENGTH * grab.progress;
+                    grab.headX = tipX;
+                    grab.headY = tipY;
                 }
-
-                const tipX = handX + Math.cos(grab.angle) * MAX_LENGTH * grab.progress;
-                const tipY = handY + Math.sin(grab.angle) * MAX_LENGTH * grab.progress;
-                grab.headX = tipX;
-                grab.headY = tipY;
+                broadcastRobotHands();
             }
-            broadcastRobotHands();
-        }
 
-        // throwables
-        for (let i = 0; i < throwables.length; i++) {
-            const t = throwables[i];
-            t.vy += THROWABLE_GRAVITY * dt;
-            t.angularSpeed *= 0.996;
-            const maxStep = 8;
-            let remainingX = t.vx * dt;
-            let remainingY = t.vy * dt;
-            let steps = Math.max(1, Math.ceil(Math.abs(remainingX) / maxStep), Math.ceil(Math.abs(remainingY) / maxStep));
-            const stepX = remainingX / steps;
-            const stepY = remainingY / steps;
-
-            for (let step = 0; step < steps; step++) {
-                t.x += stepX;
-                t.y += stepY;
-                t.life -= dt / steps;
-                t.angle += t.angularSpeed * dt / steps;
-                if (t.life <= 0) break;
-
-                let bounced = false;
-                if (t.x - t.radius < 0 && t.x + t.radius > -BREAK_BOUNDS_OFFSET) {
-                    t.x = t.radius;
-                    t.vx = -t.vx * 0.4;
-                    t.angularSpeed = -t.angularSpeed * 0.8 + (Math.random() - 0.5) * 0.1;
-                    bounced = true;
-                }
-                if (t.x + t.radius > WORLD_WIDTH && t.x - t.radius < WORLD_WIDTH + BREAK_BOUNDS_OFFSET) {
-                    t.x = WORLD_WIDTH - t.radius;
-                    t.vx = -t.vx * 0.4;
-                    bounced = true;
-                }
-                if (t.y - t.radius < 0 && t.y + t.radius > -BREAK_BOUNDS_OFFSET) {
-                    t.y = t.radius;
-                    t.vy = -t.vy * 0.4;
-                    bounced = true;
-                }
-                if (bounced) continue;
-
-                let hitPlatform = false;
-                for (let plat of platforms) {
-                    if (t.x + t.radius > plat.x && t.x - t.radius < plat.x + plat.w &&
-                        t.y + t.radius > plat.y && t.y - t.radius < plat.y + plat.h) {
-                        const left = t.x + t.radius - plat.x;
-                        const right = plat.x + plat.w - (t.x - t.radius);
-                        const top = t.y + t.radius - plat.y;
-                        const bottom = plat.y + plat.h - (t.y - t.radius);
-                        const minOver = Math.min(left, right, top, bottom);
-                        if (minOver === left || minOver === right) {
-                            t.vx = -t.vx * 0.7;
-                            if (minOver === left) t.x = plat.x - t.radius;
-                            else t.x = plat.x + plat.w + t.radius;
-                        } else {
-                            t.vy = -t.vy * 0.5;
-                            t.vx *= 0.92;
-                            t.angularSpeed *= 0.7;
-                            if (Math.abs(t.vx) < 0.2) t.vx = 0;
-                            if (minOver === top) t.y = plat.y - t.radius;
-                            else t.y = plat.y + plat.h + t.radius;
-                            t.life -= 0.5;
-                        }
-                        hitPlatform = true;
-                        break;
+            for (let i = 0; i < throwables.length; i++) {
+                const t = throwables[i];
+                t.vy += THROWABLE_GRAVITY * dt;
+                t.angularSpeed *= 0.996;
+                const maxStep = 8;
+                let remainingX = t.vx * dt;
+                let remainingY = t.vy * dt;
+                let steps = Math.max(1, Math.ceil(Math.abs(remainingX) / maxStep), Math.ceil(Math.abs(remainingY) / maxStep));
+                const stepX = remainingX / steps;
+                const stepY = remainingY / steps;
+                for (let step = 0; step < steps; step++) {
+                    t.x += stepX;
+                    t.y += stepY;
+                    t.life -= dt / steps;
+                    t.angle += t.angularSpeed * dt / steps;
+                    if (t.life <= 0) break;
+                    let bounced = false;
+                    if (t.x - t.radius < 0 && t.x + t.radius > -BREAK_BOUNDS_OFFSET) {
+                        t.x = t.radius;
+                        t.vx = -t.vx * 0.4;
+                        t.angularSpeed = -t.angularSpeed * 0.8 + (Math.random() - 0.5) * 0.1;
+                        bounced = true;
                     }
-                }
-                if (hitPlatform) continue;
-
-                let hitHazard = false;
-                for (let h of hazards) {
-                    if (t.x + t.radius > h.x && t.x - t.radius < h.x + h.w &&
-                        t.y + t.radius > h.y && t.y - t.radius < h.y + h.h) {
-                        const left = t.x + t.radius - h.x;
-                        const right = h.x + h.w - (t.x - t.radius);
-                        const top = t.y + t.radius - h.y;
-                        const bottom = h.y + h.h - (t.y - t.radius);
-                        const minOver = Math.min(left, right, top, bottom);
-                        if (minOver === left || minOver === right) {
-                            t.vx = -t.vx * 0.6;
-                            t.angularSpeed = -t.angularSpeed * 0.9;
-                            if (minOver === left) t.x = h.x - t.radius;
-                            else t.x = h.x + h.w + t.radius;
-                        } else {
-                            t.vy = -t.vy * 0.6;
-                            if (minOver === top) t.y = h.y - t.radius;
-                            else t.y = h.y + h.h + t.radius;
-                        }
-                        hitHazard = true;
-                        break;
+                    if (t.x + t.radius > WORLD_WIDTH && t.x - t.radius < WORLD_WIDTH + BREAK_BOUNDS_OFFSET) {
+                        t.x = WORLD_WIDTH - t.radius;
+                        t.vx = -t.vx * 0.4;
+                        bounced = true;
                     }
-                }
-                if (hitHazard) continue;
-
-                let hitPlayer = false;
-                for (let id in players) {
-                    if (id === t.ownerId) continue;
-                    const target = players[id];
-                    if (target.eliminated) continue;
-                    const dx = t.x - (target.x + target.width / 2);
-                    const dy = t.y - (target.y + target.height / 2);
-                    const dist = Math.hypot(dx, dy);
-                    if (dist < t.radius + target.width / 2) {
-                        const angle = Math.atan2(t.vy, t.vx);
-                        if (t.dropItem) {
-                            t.vx = Math.cos(angle) * Math.abs(t.vx) * 0.5;
-                            t.vy = Math.sin(angle) * Math.abs(t.vy) * 0.5;
-                            const pushX = dx / dist * (t.radius + target.width / 2);
-                            const pushY = dy / dist * (t.radius + target.height / 2);
-                            t.x += pushX * 0.5;
-                            t.y += pushY * 0.5;
+                    if (t.y - t.radius < 0 && t.y + t.radius > -BREAK_BOUNDS_OFFSET) {
+                        t.y = t.radius;
+                        t.vy = -t.vy * 0.4;
+                        bounced = true;
+                    }
+                    if (bounced) continue;
+                    let hitPlatform = false;
+                    for (let plat of platforms) {
+                        if (t.x + t.radius > plat.x && t.x - t.radius < plat.x + plat.w &&
+                            t.y + t.radius > plat.y && t.y - t.radius < plat.y + plat.h) {
+                            const left = t.x + t.radius - plat.x;
+                            const right = plat.x + plat.w - (t.x - t.radius);
+                            const top = t.y + t.radius - plat.y;
+                            const bottom = plat.y + plat.h - (t.y - t.radius);
+                            const minOver = Math.min(left, right, top, bottom);
+                            if (minOver === left || minOver === right) {
+                                t.vx = -t.vx * 0.7;
+                                if (minOver === left) t.x = plat.x - t.radius;
+                                else t.x = plat.x + plat.w + t.radius;
+                            } else {
+                                t.vy = -t.vy * 0.5;
+                                t.vx *= 0.92;
+                                t.angularSpeed *= 0.7;
+                                if (Math.abs(t.vx) < 0.2) t.vx = 0;
+                                if (minOver === top) t.y = plat.y - t.radius;
+                                else t.y = plat.y + plat.h + t.radius;
+                                t.life -= 0.5;
+                            }
+                            hitPlatform = true;
+                            break;
+                        }
+                    }
+                    if (hitPlatform) continue;
+                    let hitHazard = false;
+                    for (let h of hazards) {
+                        if (t.x + t.radius > h.x && t.x - t.radius < h.x + h.w &&
+                            t.y + t.radius > h.y && t.y - t.radius < h.y + h.h) {
+                            const left = t.x + t.radius - h.x;
+                            const right = h.x + h.w - (t.x - t.radius);
+                            const top = t.y + t.radius - h.y;
+                            const bottom = h.y + h.h - (t.y - t.radius);
+                            const minOver = Math.min(left, right, top, bottom);
+                            if (minOver === left || minOver === right) {
+                                t.vx = -t.vx * 0.6;
+                                t.angularSpeed = -t.angularSpeed * 0.9;
+                                if (minOver === left) t.x = h.x - t.radius;
+                                else t.x = h.x + h.w + t.radius;
+                            } else {
+                                t.vy = -t.vy * 0.6;
+                                if (minOver === top) t.y = h.y - t.radius;
+                                else t.y = h.y + h.h + t.radius;
+                            }
+                            hitHazard = true;
+                            break;
+                        }
+                    }
+                    if (hitHazard) continue;
+                    let hitPlayer = false;
+                    for (let id in players) {
+                        if (id === t.ownerId) continue;
+                        const target = players[id];
+                        if (target.eliminated) continue;
+                        const dx = t.x - (target.x + target.width / 2);
+                        const dy = t.y - (target.y + target.height / 2);
+                        const dist = Math.hypot(dx, dy);
+                        if (dist < t.radius + target.width / 2) {
+                            const angle = Math.atan2(t.vy, t.vx);
+                            if (t.dropItem) {
+                                t.vx = Math.cos(angle) * Math.abs(t.vx) * 0.5;
+                                t.vy = Math.sin(angle) * Math.abs(t.vy) * 0.5;
+                                const pushX = dx / dist * (t.radius + target.width / 2);
+                                const pushY = dy / dist * (t.radius + target.height / 2);
+                                t.x += pushX * 0.5;
+                                t.y += pushY * 0.5;
+                                hitPlayer = true;
+                                break;
+                            }
+                            target.knockbackTimer = 0.25;
+                            target.knockbackVx = Math.cos(angle) * 15;
+                            target.knockbackVy = Math.sin(angle) * 15;
+                            if (target.item !== null) {
+                                t.vx = Math.cos(angle) * Math.abs(t.vx) * 0.7;
+                                t.vy = Math.sin(angle) * Math.abs(t.vy) * 0.7;
+                                t.life = Math.max(t.life - 30, 30);
+                                const pushX = dx / dist * (t.radius + target.width / 2);
+                                const pushY = dy / dist * (t.radius + target.height / 2);
+                                t.x += pushX * 0.8;
+                                t.y += pushY * 0.8;
+                                playSound('spike');
+                            } else {
+                                const dropX = target.x + target.width / 2 - 12;
+                                const dropY = target.y + target.height - 12;
+                                itemManager.spawnItem(dropX, dropY, t.itemType, 0, false, t.ammo);
+                                broadcastWorldItems();
+                                throwables.splice(i, 1);
+                                i--;
+                            }
                             hitPlayer = true;
                             break;
                         }
-                        target.knockbackTimer = 0.25;
-                        target.knockbackVx = Math.cos(angle) * 15;
-                        target.knockbackVy = Math.sin(angle) * 15;
-                        if (target.item !== null) {
-                            t.vx = Math.cos(angle) * Math.abs(t.vx) * 0.7;
-                            t.vy = Math.sin(angle) * Math.abs(t.vy) * 0.7;
-                            t.life = Math.max(t.life - 30, 30);
-                            const pushX = dx / dist * (t.radius + target.width / 2);
-                            const pushY = dy / dist * (t.radius + target.height / 2);
-                            t.x += pushX * 0.8;
-                            t.y += pushY * 0.8;
-                            playSound('spike');
-                        } else {
-                            const dropX = target.x + target.width / 2 - 12;
-                            const dropY = target.y + target.height - 12;
-                            itemManager.spawnItem(dropX, dropY, t.itemType, 0, false, t.ammo);
-                            broadcastWorldItems();
-                            throwables.splice(i, 1);
-                            i--;
-                        }
-                        hitPlayer = true;
-                        break;
                     }
+                    if (hitPlayer) break;
                 }
-                if (hitPlayer) break;
-            }
-
-            if (throwables[i] && t.life <= 0) {
-                const spawnX = t.x - 12;
-                const spawnY = t.y - 12;
-                if (spawnX > -BREAK_BOUNDS_OFFSET && spawnX < WORLD_WIDTH + BREAK_BOUNDS_OFFSET &&
-                    spawnY > -BREAK_BOUNDS_OFFSET && spawnY < WORLD_HEIGHT + BREAK_BOUNDS_OFFSET) {
-                    itemManager.spawnItem(spawnX, spawnY, t.itemType, 0, false, t.ammo);
-                    broadcastWorldItems();
+                if (throwables[i] && t.life <= 0) {
+                    const spawnX = t.x - 12;
+                    const spawnY = t.y - 12;
+                    if (spawnX > -BREAK_BOUNDS_OFFSET && spawnX < WORLD_WIDTH + BREAK_BOUNDS_OFFSET &&
+                        spawnY > -BREAK_BOUNDS_OFFSET && spawnY < WORLD_HEIGHT + BREAK_BOUNDS_OFFSET) {
+                        itemManager.spawnItem(spawnX, spawnY, t.itemType, 0, false, t.ammo);
+                        broadcastWorldItems();
+                    }
+                    throwables.splice(i, 1);
+                    i--;
+                    continue;
                 }
-                throwables.splice(i, 1);
-                i--;
-                continue;
-            }
-
-            const breakX = (t.x + t.radius < -BREAK_BOUNDS_OFFSET || t.x - t.radius > WORLD_WIDTH + BREAK_BOUNDS_OFFSET);
-            const breakY = (t.y + t.radius < -BREAK_BOUNDS_OFFSET || t.y - t.radius > WORLD_HEIGHT + BREAK_BOUNDS_OFFSET);
-            if (breakX || breakY) {
-                for (let s = 0; s < 8; s++) {
-                    particles.push({
-                        x: t.x, y: t.y,
-                        vx: (Math.random() - 0.5) * 4,
-                        vy: (Math.random() - 0.5) * 4,
-                        life: 0.4, age: 0,
-                        size: Math.random() * 4 + 2,
-                        color: '#ffaa44', alpha: 1
-                    });
+                const breakX = (t.x + t.radius < -BREAK_BOUNDS_OFFSET || t.x - t.radius > WORLD_WIDTH + BREAK_BOUNDS_OFFSET);
+                const breakY = (t.y + t.radius < -BREAK_BOUNDS_OFFSET || t.y - t.radius > WORLD_HEIGHT + BREAK_BOUNDS_OFFSET);
+                if (breakX || breakY) {
+                    for (let s = 0; s < 8; s++) {
+                        particles.push({
+                            x: t.x, y: t.y,
+                            vx: (Math.random() - 0.5) * 4,
+                            vy: (Math.random() - 0.5) * 4,
+                            life: 0.4, age: 0,
+                            size: Math.random() * 4 + 2,
+                            color: '#ffaa44', alpha: 1
+                        });
+                    }
+                    playSound('spike');
+                    throwables.splice(i, 1);
+                    i--;
                 }
-                playSound('spike');
-                throwables.splice(i, 1);
-                i--;
             }
         }
 
         if (isHost) broadcastThrowables();
         if (isHost) broadcastProjectiles();
+
         ctx.save(); ctx.scale(camera.zoom, camera.zoom); ctx.translate(-camera.x, -camera.y);
         drawCanvasLevelLayout();
         updateAndRenderParticles();
@@ -2407,6 +2536,8 @@ function enginePipelineTick(timestamp) {
         drawSettingsDoorUI();
         ctx.restore();
         drawOffscreenRadarIndicators();
+
+        drawPlacementPhaseOverlay();
 
         if (currentEngineMode === 'LOBBY') {
             drawLobbyScoreboard();
@@ -2449,7 +2580,7 @@ function enginePipelineTick(timestamp) {
 }
 
 // ============================================================================
-//  INPUT HANDLING (unchanged)
+//  INPUT HANDLING (with R key for ready, zoom disabled during placement)
 // ============================================================================
 
 window.addEventListener('keydown', (e) => {
@@ -2459,6 +2590,12 @@ window.addEventListener('keydown', (e) => {
     if (['f', 'F'].includes(e.key)) keys.Interact = true;
     if (e.key === 'q' || e.key === 'Q') keys.Drop = true;
     if (e.code === 'ShiftLeft') keys.ShiftLeft = true;
+
+    // Press R to toggle ready status in lobby
+    if ((e.key === 'r' || e.key === 'R') && currentEngineMode === 'LOBBY') {
+        e.preventDefault();
+        toggleReadyStatus();
+    }
 
     if (spectatorMode && currentEngineMode === 'GAME') {
         if (e.key === 'ArrowLeft') {
@@ -2482,6 +2619,11 @@ window.addEventListener('keyup', (e) => {
 
 window.addEventListener('mousedown', (e) => { if (e.button === 1) { e.preventDefault(); camera.isZoomed = !camera.isZoomed; camera.targetZoom = camera.isZoomed ? 1.75 : 1.0; } });
 window.addEventListener('wheel', (e) => {
+    // Disable zoom during placement phases (CHOOSE or PLACE)
+    if (currentEngineMode === 'GAME' && (matchPhase === 'CHOOSE' || matchPhase === 'PLACE')) {
+        e.preventDefault();
+        return;
+    }
     if (currentEngineMode === 'LOBBY' || currentEngineMode === 'GAME') {
         e.preventDefault();
         const sens = 0.15;
@@ -2565,7 +2707,6 @@ document.addEventListener('DOMContentLoaded', () => {
         toggleBtn.textContent = '📊';
     });
 
-    // FIX: Settings modal close button
     const closeSettingsBtn = document.getElementById('close-settings-btn');
     if (closeSettingsBtn) {
         closeSettingsBtn.addEventListener('click', saveSettings);
@@ -2638,7 +2779,6 @@ let faceDrawingCanvas = null, faceDrawingCtx = null, faceOverlayCanvas = null, f
 let isDrawingFace = false, currentDrawColorFace = '#FFFFFF', currentBrushSizeFace = 20;
 let eraserActiveFace = false, lastPenColorFace = '#FFFFFF', faceCanvasBgColor = '#0c0516';
 
-// GLOBAL apply mode
 function applyFaceDrawingMode() {
     if (!faceOverlayCtx) return;
     if (eraserActiveFace) {
@@ -2763,9 +2903,6 @@ window.status = function () {
     }
 };
 
-// ------------------------------------------------------------------
-// DEBUG / CONSOLE COMMANDS
-// ------------------------------------------------------------------
 window.forceStartMatch = function () {
     if (!isHost) {
         console.warn("forceStartMatch: You are not the host.");
