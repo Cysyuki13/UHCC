@@ -21,6 +21,18 @@ const DRAFT_SHAPES = [
     { type: 'Z_BLOCK', w: 120, h: 80, color: '#ff007f', blocks: [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 40 }, { x: 80, y: 40 }] }
 ];
 
+// ------------------------------------------------------------------
+// Shuffle helper – ensures the draft menu order is random each match
+// ------------------------------------------------------------------
+function shuffleArray(arr) {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+}
+
 // ============================================================================
 //  SOUND & UI
 // ============================================================================
@@ -269,8 +281,23 @@ function checkAllPlayersEliminatedAndEndMatch() {
     if (matchEndingInProgress) return false;
 
     const alive = getAlivePlayers();
-    if (alive.length === 0) {
+
+    // 1. Check if anyone has crossed the finish line yet
+    const hasAnyoneFinished = finishPositions && finishPositions.length > 0;
+
+    // 2. Filter out alive players who have already finished to find active racers
+    // (This safely checks if finishPositions contains player IDs or full player objects)
+    const activeRacersStillAlive = alive.filter(p => {
+        return !finishPositions.some(f => f === p.id || f.id === p.id);
+    });
+
+    // Match ends if:
+    // - Option A: Absolutely everyone is dead (alive.length === 0)
+    // - Option B: Someone finished, and all other players are dead (activeRacersStillAlive.length === 0)
+    if (alive.length === 0 || (hasAnyoneFinished && activeRacersStillAlive.length === 0)) {
         matchEndingInProgress = true;
+
+        // Stop both the main match timer and the 30-second countdown timer immediately
         if (gameTimer) { clearInterval(gameTimer); gameTimer = null; }
         if (raceTimerId) { clearInterval(raceTimerId); raceTimerId = null; }
 
@@ -785,6 +812,31 @@ function hostThrowItem(playerId, angle, power = 14) {
 }
 
 // ============================================================================
+//  SAFE ZONES – prevent placing blocks over spawn points and finish line
+// ============================================================================
+
+function getSafeZones() {
+    const zones = [];
+    if (currentEngineMode !== 'GAME') return zones;
+    if (matchPhase === 'PLAY') return zones;
+
+    // 只使用地图 JSON 中定义的 safeZones
+    const map = MAPS[currentSelectedMapName];
+    if (map && map.safeZones && Array.isArray(map.safeZones)) {
+        map.safeZones.forEach(zone => {
+            zones.push({
+                x: zone.x,
+                y: zone.y,
+                w: zone.w,
+                h: zone.h,
+                type: 'custom'
+            });
+        });
+    }
+    return zones;
+}
+
+// ============================================================================
 //  NEW PRE-MATCH DRAFTING LOGIC MECHANISMS
 // ============================================================================
 
@@ -800,8 +852,10 @@ function initializePlacementPhase() {
         placementCursors[id] = { x: BASE_WIDTH / 2, y: BASE_HEIGHT / 2, confirmed: false };
     });
 
+    // Shuffle the shapes for variety
+    const shuffledShapes = shuffleArray(DRAFT_SHAPES);
     for (let i = 0; i < totalCount; i++) {
-        const shapeTemplate = DRAFT_SHAPES[i % DRAFT_SHAPES.length];
+        const shapeTemplate = shuffledShapes[i % shuffledShapes.length];
         const spacing = BASE_WIDTH / (totalCount + 1);
         placementPool.push({
             id: 'block_' + i,
@@ -897,7 +951,7 @@ function updatePlacementPhases(dt) {
                 if (validatePlacement(cursor.x, cursor.y, block)) {
                     confirmPlacementRequest(cursor.x, cursor.y);
                 } else {
-                    console.log("Placement overlaps map component or object!");
+                    console.log("Placement overlaps map component, safe zone, or object!");
                     playSound('spike');
                 }
             }
@@ -926,6 +980,15 @@ function validatePlacement(x, y, block) {
             return false;
         }
     }
+
+    // --- Safe zone check ---
+    const safeZones = getSafeZones();
+    for (let zone of safeZones) {
+        if (bx1 < zone.x + zone.w && bx2 > zone.x && by1 < zone.y + zone.h && by2 > zone.y) {
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -1097,35 +1160,48 @@ function drawPlacementPhaseOverlay() {
         const localCur = placementCursors[localPlayerId];
         if (localCur) {
             // --- SMOOTH CAMERA FOLLOW ---
-            // Define a smoothing factor (lower = slower follow)
             const CAM_LERP = 0.07;
-            // Calculate desired camera position (centered on cursor)
             let targetCamX = localCur.x - BASE_WIDTH / 2;
             let targetCamY = localCur.y - BASE_HEIGHT / 2;
 
-            // Use world dimensions as the absolute limit
             const maxWorldCamX = WORLD_WIDTH - BASE_WIDTH;
             const maxWorldCamY = WORLD_HEIGHT - BASE_HEIGHT;
 
             targetCamX = Math.max(cameraBounds.minX, Math.min(targetCamX, maxWorldCamX));
             targetCamY = Math.max(cameraBounds.minY, Math.min(targetCamY, maxWorldCamY));
 
-            // Apply linear interpolation for smooth movement
             camera.x += (targetCamX - camera.x) * CAM_LERP;
             camera.y += (targetCamY - camera.y) * CAM_LERP;
 
-            // Re‑clamp after interpolation to avoid edge overrun
             camera.x = Math.max(cameraBounds.minX, Math.min(camera.x, cameraBounds.maxX - BASE_WIDTH));
             camera.y = Math.max(cameraBounds.minY, Math.min(camera.y, cameraBounds.maxY - BASE_HEIGHT));
         }
 
-        // Draw the world (platforms, etc.) with the current camera
+        // Draw the world with the current camera
         ctx.save();
         ctx.translate(-camera.x, -camera.y);
 
-        // Draw existing platforms, hazards, gems, etc. (optional: copy from your level drawing)
-        // For brevity, we assume you have a drawLevel() function, but here we just draw the block preview.
+        // --- Draw safe zones ---
+        const safeZones = getSafeZones();
+        safeZones.forEach(zone => {
+            ctx.fillStyle = 'rgba(255, 0, 0, 0.15)';
+            ctx.fillRect(zone.x, zone.y, zone.w, zone.h);
+            ctx.strokeStyle = 'rgba(255, 0, 0, 0.6)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 4]);
+            ctx.strokeRect(zone.x, zone.y, zone.w, zone.h);
+            ctx.setLineDash([]);
+            // Label
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+            ctx.font = '12px Orbitron';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            const label = zone.type === 'spawn' ? 'SPAWN' : 'FINISH';
+            ctx.fillText(label, zone.x + zone.w / 2, zone.y - 4);
+            ctx.textBaseline = 'alphabetic';
+        });
 
+        // --- Local player block preview ---
         const myBlock = playerSelectedBlock[localPlayerId];
         if (myBlock && localCur && !localCur.confirmed) {
             const valid = validatePlacement(localCur.x, localCur.y, myBlock);
@@ -1138,7 +1214,29 @@ function drawPlacementPhaseOverlay() {
             ctx.globalAlpha = 1.0;
         }
 
-        // Draw other players' cursors
+        // --- Draw other players' block projections ---
+        for (let id in placementCursors) {
+            if (id === localPlayerId) continue;
+            const cur = placementCursors[id];
+            if (cur.confirmed) continue;
+            const block = playerSelectedBlock[id];
+            if (!block) continue;
+
+            ctx.globalAlpha = 0.3;
+            ctx.fillStyle = block.color;
+            ctx.fillRect(cur.x, cur.y, block.w, block.h);
+            ctx.strokeStyle = "rgba(255,255,255,0.5)";
+            ctx.lineWidth = 1;
+            ctx.strokeRect(cur.x, cur.y, block.w, block.h);
+            ctx.globalAlpha = 1.0;
+
+            ctx.font = "10px Orbitron";
+            ctx.fillStyle = "#fff";
+            ctx.textAlign = "center";
+            ctx.fillText(players[id]?.nameTag || "Player", cur.x + block.w / 2, cur.y - 5);
+        }
+
+        // --- Draw all players' cursors and names ---
         for (let id in placementCursors) {
             const cur = placementCursors[id];
             const pColor = players[id]?.color || '#ffffff';
@@ -1157,6 +1255,7 @@ function drawPlacementPhaseOverlay() {
                 ctx.stroke();
             }
         }
+
         ctx.restore();
 
         // UI text
@@ -1166,6 +1265,6 @@ function drawPlacementPhaseOverlay() {
         ctx.fillText("PLACE YOUR BLOCK ON THE MAP", BASE_WIDTH / 2, 50);
         ctx.font = "14px Share Tech Mono";
         ctx.fillStyle = "#ddd";
-        ctx.fillText("Cannot overlap existing components. Click or press E to place.", BASE_WIDTH / 2, 80);
+        ctx.fillText("Cannot overlap existing components or safe zones. Click or press E to place.", BASE_WIDTH / 2, 80);
     }
 }

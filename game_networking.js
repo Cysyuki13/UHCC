@@ -656,7 +656,7 @@ function evaluateLobbyDoorTrigger() {
     const ready = Object.keys(readyPlayers).length;
     if (total >= 2 && ready > total / 2) {
         if (lobbyCountdownVal === -1) {
-            lobbyCountdownVal = 10;
+            lobbyCountdownVal = 5; // count down 10s
             playSound('door');
             broadcastToRoom('sync_lobby_countdown', { value: lobbyCountdownVal });
             if (lobbyTimerId) clearInterval(lobbyTimerId);
@@ -812,8 +812,37 @@ function executeActiveMatchStart() {
     playerSelectedBlock = {};
     placementCursors = {};
 
-    for (let i = 0; i < totalPlayers + 1; i++) {
-        const template = DRAFT_SHAPES[i % DRAFT_SHAPES.length];
+    // Shuffle the shapes once for this match
+    const shuffledShapes = shuffleArray(DRAFT_SHAPES);
+
+    // Helper: generate non‑overlapping random position
+    function getRandomPosition(template, placedShapes) {
+        const margin = 20;
+        const topMargin = 150; // keep away from the title text
+        const maxX = BASE_WIDTH - template.w - margin;
+        const maxY = BASE_HEIGHT - template.h - margin;
+        let attempts = 0;
+        let pos;
+        let overlap;
+        do {
+            pos = {
+                x: margin + Math.random() * (maxX - margin),
+                y: topMargin + Math.random() * (maxY - topMargin)
+            };
+            overlap = placedShapes.some(p =>
+                pos.x < p.menuX + p.w && pos.x + template.w > p.menuX &&
+                pos.y < p.menuY + p.h && pos.y + template.h > p.menuY
+            );
+            attempts++;
+        } while (overlap && attempts < 100);
+        return pos;
+    }
+
+    const placedShapes = [];
+
+    for (let i = 0; i < totalPlayers + 2; i++) {
+        const template = shuffledShapes[i % shuffledShapes.length];
+        const pos = getRandomPosition(template, placedShapes);
         placementPool.push({
             id: 'item_' + i,
             type: template.type,
@@ -822,9 +851,10 @@ function executeActiveMatchStart() {
             color: template.color,
             blocks: template.blocks,
             claimedBy: null,
-            menuX: 150 + (i * 200) % (BASE_WIDTH - 300),
-            menuY: 250 + Math.floor((i * 200) / (BASE_WIDTH - 300)) * 160
+            menuX: pos.x,
+            menuY: pos.y
         });
+        placedShapes.push({ menuX: pos.x, menuY: pos.y, w: template.w, h: template.h });
     }
 
     for (let id in players) {
@@ -896,6 +926,7 @@ function startOfficialMatchRun() {
 // ============================================================================
 function checkAndProcessRaceFinish() {
     if (!isHost || currentEngineMode !== 'GAME' || !raceStarted) return;
+
     for (let id in players) {
         const pl = players[id];
         if (pl.eliminated || pl.finished) continue;
@@ -922,7 +953,7 @@ function checkAndProcessRaceFinish() {
             }, 1000);
         }
 
-        // If all players are now either finished or eliminated, end immediately
+        // 原有检查：冲线后立即判断
         if (allPlayersFinishedOrEliminated()) {
             if (raceTimerId) {
                 clearInterval(raceTimerId);
@@ -931,6 +962,22 @@ function checkAndProcessRaceFinish() {
             finalizeMatchAndEnd();
             break;
         }
+    }
+
+    // 🔥 原新增检查（保留）
+    if (raceTimerId && allPlayersFinishedOrEliminated()) {
+        clearInterval(raceTimerId);
+        raceTimerId = null;
+        finalizeMatchAndEnd();
+    }
+
+    // 🆕 无条件检查：只要比赛已开始且所有玩家都完成或淘汰，立即结束
+    if (raceStarted && allPlayersFinishedOrEliminated()) {
+        if (raceTimerId) {
+            clearInterval(raceTimerId);
+            raceTimerId = null;
+        }
+        finalizeMatchAndEnd();
     }
 }
 
@@ -1002,7 +1049,6 @@ function executeLobbyReturnSequence() {
         players[id].eliminated = false;
         players[id].finished = false;
         players[id].finishTime = -1;
-        players[id].score = 0;
         players[id].item = null;
         players[id].itemType = null;
         players[id].ammo = 0;
@@ -1595,7 +1641,8 @@ robotHandClawImg.src = 'assets/items/robot_hand_claw.svg';
 
 function drawCanvasLevelLayout() {
     platforms.forEach(plat => {
-        ctx.fillStyle = '#170c30';
+        // 使用平台自身的颜色，若未定义则使用默认色
+        ctx.fillStyle = plat.color || '#170c30';
         ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
         ctx.strokeStyle = '#7f00ff';
         ctx.lineWidth = 2;
