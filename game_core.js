@@ -6,6 +6,10 @@ let placementPool = [];   // Shared objects list available to draft
 let playerSelectedBlock = {}; // Mapping: { playerId: blockObject }
 let placementCursors = {};    // Mapping: { playerId: { x, y, confirmed } }
 
+// Draft timer (60 seconds) – only active on host
+let placementTimer = 60;
+let placementTimerInterval = null;
+
 // Track local clicks for selection triggers
 window.mouseJustClicked = false;
 window.addEventListener('mousedown', () => {
@@ -529,6 +533,10 @@ function hostResetLobby() {
 
     if (lobbyTimerId) { clearInterval(lobbyTimerId); lobbyTimerId = null; }
     if (raceTimerId) { clearInterval(raceTimerId); raceTimerId = null; }
+    if (placementTimerInterval) {
+        clearInterval(placementTimerInterval);
+        placementTimerInterval = null;
+    }
     lobbyCountdownVal = -1;
     raceCountdownVal = -1;
     raceStarted = false;
@@ -871,6 +879,51 @@ function initializePlacementPhase() {
     }
 }
 
+// Auto-assign remaining blocks when timer expires
+function autoAssignRemainingBlocks() {
+    if (!isHost || matchPhase !== 'CHOOSE') return;
+
+    // Find players who haven't chosen yet
+    const playersWithoutBlock = Object.keys(players).filter(id => !playerSelectedBlock[id]);
+
+    // Get all unclaimed blocks
+    const unclaimedBlocks = placementPool.filter(b => !b.claimedBy);
+
+    playersWithoutBlock.forEach((id, index) => {
+        if (unclaimedBlocks.length === 0) return;
+        // Pick the first unclaimed block (or cycle through)
+        const blockIndex = index % unclaimedBlocks.length;
+        const block = unclaimedBlocks.splice(blockIndex, 1)[0];
+        block.claimedBy = id;
+        playerSelectedBlock[id] = block;
+        if (placementCursors[id]) placementCursors[id].confirmed = true;
+    });
+
+    // Broadcast updated pool
+    broadcastToRoom('sync_placement_pool', { pool: placementPool, selections: playerSelectedBlock, cursors: placementCursors });    // Check if everyone now has a block
+    const allChosen = Object.keys(players).every(id => playerSelectedBlock[id] !== undefined);
+    if (allChosen) {
+        // Stop timer if still running
+        if (placementTimerInterval) {
+            clearInterval(placementTimerInterval);
+            placementTimerInterval = null;
+        }
+        matchPhase = 'PLACE';
+        Object.keys(placementCursors).forEach(id => {
+            placementCursors[id].confirmed = false;
+            if (spawnPoints.length > 0) {
+                placementCursors[id].x = spawnPoints[0].x;
+                placementCursors[id].y = spawnPoints[0].y - 100;
+            } else {
+                placementCursors[id].x = WORLD_WIDTH / 2;
+                placementCursors[id].y = WORLD_HEIGHT / 2;
+            }
+        });
+        broadcastToRoom('transition_to_placement', { phase: 'PLACE', cursors: placementCursors });
+        broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
+    }
+}
+
 function updatePlacementPhases(dt) {
     if (currentEngineMode !== 'GAME' || matchPhase === 'PLAY') return;
 
@@ -960,37 +1013,111 @@ function updatePlacementPhases(dt) {
 }
 
 function validatePlacement(x, y, block) {
-    const bx1 = x;
-    const by1 = y;
-    const bx2 = x + block.w;
-    const by2 = y + block.h;
+    const CELL_SIZE = 40; // must match the cell size used in DRAFT_SHAPES and rotation
 
-    if (bx1 < cameraBounds.minX || bx2 > cameraBounds.maxX || by1 < cameraBounds.minY || by2 > cameraBounds.maxY) {
-        return false;
-    }
+    // Check every cell of the block
+    for (let cell of block.blocks) {
+        const bx1 = x + cell.x;
+        const by1 = y + cell.y;
+        const bx2 = bx1 + CELL_SIZE;
+        const by2 = by1 + CELL_SIZE;
 
-    for (let plat of platforms) {
-        if (bx1 < plat.x + plat.w && bx2 > plat.x && by1 < plat.y + plat.h && by2 > plat.y) {
+        // World bounds check
+        if (bx1 < cameraBounds.minX || bx2 > cameraBounds.maxX ||
+            by1 < cameraBounds.minY || by2 > cameraBounds.maxY) {
             return false;
+        }
+
+        // Check against existing platforms (including other placed cells)
+        for (let plat of platforms) {
+            if (bx1 < plat.x + plat.w && bx2 > plat.x &&
+                by1 < plat.y + plat.h && by2 > plat.y) {
+                return false;
+            }
+        }
+
+        // Check against hazards
+        for (let haz of hazards) {
+            if (bx1 < haz.x + haz.w && bx2 > haz.x &&
+                by1 < haz.y + haz.h && by2 > haz.y) {
+                return false;
+            }
+        }
+
+        // Check against safe zones
+        const safeZones = getSafeZones();
+        for (let zone of safeZones) {
+            if (bx1 < zone.x + zone.w && bx2 > zone.x &&
+                by1 < zone.y + zone.h && by2 > zone.y) {
+                return false;
+            }
         }
     }
 
-    for (let haz of hazards) {
-        if (bx1 < haz.x + haz.w && bx2 > haz.x && by1 < haz.y + haz.h && by2 > haz.y) {
-            return false;
-        }
-    }
-
-    // --- Safe zone check ---
-    const safeZones = getSafeZones();
-    for (let zone of safeZones) {
-        if (bx1 < zone.x + zone.w && bx2 > zone.x && by1 < zone.y + zone.h && by2 > zone.y) {
-            return false;
-        }
-    }
-
-    return true;
+    return true; // all cells are clear
 }
+
+// ============================================================================
+//  ROTATION LOGIC (Press R during PLACE phase)
+// ============================================================================
+
+function rotatePlayerBlock(playerId) {
+    if (matchPhase !== 'PLACE') return;   // only rotate during placement
+    const block = playerSelectedBlock[playerId];
+    if (!block) return;
+    const cursor = placementCursors[playerId];
+    if (!cursor || cursor.confirmed) return;
+
+    const cellSize = 40;
+    const oldW = block.w;
+    const oldH = block.h;
+
+    // Keep center fixed
+    const centerX = cursor.x + oldW / 2;
+    const centerY = cursor.y + oldH / 2;
+
+    // Rotate each cell 90° clockwise: (x, y) → (y, oldW - x - cellSize)
+    const newBlocks = block.blocks.map(cell => ({
+        x: cell.y,
+        y: oldW - cell.x - cellSize
+    }));
+
+    const newW = oldH;
+    const newH = oldW;
+
+    block.w = newW;
+    block.h = newH;
+    block.blocks = newBlocks;
+
+    // Reposition cursor to keep center
+    cursor.x = centerX - newW / 2;
+    cursor.y = centerY - newH / 2;
+
+    // --- Sync with host or broadcast ---
+    if (isHost) {
+        broadcastToRoom('sync_placement_pool', {
+            pool: placementPool,
+            selections: playerSelectedBlock,
+            cursors: placementCursors
+        });
+    } else if (hostConnection && hostConnection.open) {
+        hostConnection.send({
+            type: 'client_rotate_block',
+            senderId: localPlayerId,
+            payload: {
+                w: block.w,
+                h: block.h,
+                blocks: block.blocks,
+                cursorX: placementCursors[localPlayerId]?.x || 0,
+                cursorY: placementCursors[localPlayerId]?.y || 0
+            }
+        });
+    }
+}
+
+// ============================================================================
+//  NETWORKING HELPERS (cursor updates, selection, placement)
+// ============================================================================
 
 function sendPlacementCursorUpdate(cx, cy) {
     if (isHost) {
@@ -1022,10 +1149,18 @@ function confirmPlacementRequest(px, py) {
     if (isHost) {
         handleHostPlacementConfirm(localPlayerId, px, py);
     } else if (hostConnection?.open) {
+        const block = playerSelectedBlock[localPlayerId];
+        if (!block) return;
         hostConnection.send({
             type: 'client_confirm_placement',
             senderId: localPlayerId,
-            payload: { x: px, y: py }
+            payload: {
+                x: px,
+                y: py,
+                w: block.w,
+                h: block.h,
+                color: block.color
+            }
         });
     }
 }
@@ -1042,6 +1177,11 @@ function handleHostBlockClaim(playerId, blockId) {
 
         const allChosen = Object.keys(players).every(id => playerSelectedBlock[id] !== undefined);
         if (allChosen) {
+            // Stop the draft timer
+            if (placementTimerInterval) {
+                clearInterval(placementTimerInterval);
+                placementTimerInterval = null;
+            }
             matchPhase = 'PLACE';
             Object.keys(placementCursors).forEach(id => {
                 placementCursors[id].confirmed = false;
@@ -1054,6 +1194,7 @@ function handleHostBlockClaim(playerId, blockId) {
                 }
             });
             broadcastToRoom('transition_to_placement', { phase: 'PLACE', cursors: placementCursors });
+            broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
         }
     }
 }
@@ -1063,13 +1204,16 @@ function handleHostPlacementConfirm(playerId, px, py) {
     const block = playerSelectedBlock[playerId];
     if (block && placementCursors[playerId] && !placementCursors[playerId].confirmed) {
         if (validatePlacement(px, py, block)) {
-            platforms.push({
-                x: px,
-                y: py,
-                w: block.w,
-                h: block.h,
-                color: block.color,
-                isPlacedBlock: true
+            const CELL_SIZE = 40;
+            block.blocks.forEach(cell => {
+                platforms.push({
+                    x: px + cell.x,
+                    y: py + cell.y,
+                    w: CELL_SIZE,
+                    h: CELL_SIZE,
+                    color: block.color,
+                    isPlacedBlock: true
+                });
             });
             placementCursors[playerId].confirmed = true;
 
@@ -1098,6 +1242,10 @@ function startOfficialMatchRun() {
     repositionAllPlayersToSpawnPoints();
 }
 
+// ============================================================================
+//  DRAFT OVERLAY RENDERING
+// ============================================================================
+
 function drawPlacementPhaseOverlay() {
     if (currentEngineMode !== 'GAME' || matchPhase === 'PLAY') return;
 
@@ -1105,37 +1253,95 @@ function drawPlacementPhaseOverlay() {
         ctx.fillStyle = "rgba(12, 5, 22, 0.95)";
         ctx.fillRect(0, 0, BASE_WIDTH, BASE_HEIGHT);
 
+        // --- Title (moved up slightly) ---
         ctx.font = "bold 28px Orbitron";
         ctx.fillStyle = "#00f2fe";
         ctx.textAlign = "center";
-        ctx.fillText("CHOOSE YOUR OBJECT TO PLACE", BASE_WIDTH / 2, 100);
-        ctx.font = "16px Share Tech Mono";
-        ctx.fillStyle = "#aaa";
-        ctx.fillText("Use Mouse or WASD/Arrows + Click/E to draft an item", BASE_WIDTH / 2, 140);
+        ctx.fillText("CHOOSE YOUR OBJECT TO PLACE", BASE_WIDTH / 2, 85);
 
+        // --- Progress bar for the timer ---
+        const barX = 0;
+        const barY = 115;
+        const barW = BASE_WIDTH;  // 880px wide, centered
+        const barH = 5;
+
+        // Background
+        ctx.fillStyle = "rgba(0,0,0,0.7)";
+        ctx.fillRect(barX, barY, barW, barH);
+
+        // Progress (fraction remaining)
+        const progress = Math.max(0, placementTimer / 60);
+        let barColor;
+        if (progress > 0.5) {
+            barColor = "#00ff66";        // green
+        } else if (progress > 0.25) {
+            barColor = "#ffcc00";        // yellow
+        } else {
+            barColor = "#ff3333";        // red
+        }
+        ctx.fillStyle = barColor;
+        ctx.fillRect(barX, barY, barW * progress, barH);
+
+        // Border
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(barX, barY, barW, barH);
+
+        // Timer text inside the bar
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 16px Orbitron";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(`${placementTimer}s`, barX + barW / 2, barY + barH + 15);
+        ctx.textBaseline = "alphabetic";
+
+        // --- Draw the draft blocks ---
         placementPool.forEach(item => {
             ctx.save();
+            const CELL_SIZE = 40;
             if (item.claimedBy) {
-                ctx.fillStyle = "rgba(40, 40, 50, 0.5)";
-                ctx.fillRect(item.menuX, item.menuY, item.w, item.h);
+                // Draw cells with reduced alpha
+                ctx.globalAlpha = 0.5;
+                item.blocks.forEach(cell => {
+                    const cx = item.menuX + cell.x;
+                    const cy = item.menuY + cell.y;
+                    ctx.fillStyle = item.color;
+                    ctx.fillRect(cx, cy, CELL_SIZE, CELL_SIZE);
+                    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(cx, cy, CELL_SIZE, CELL_SIZE);
+                });
+                ctx.globalAlpha = 1;
+                // Outline to show it's claimed
                 ctx.strokeStyle = "#ff007f";
                 ctx.lineWidth = 2;
                 ctx.strokeRect(item.menuX, item.menuY, item.w, item.h);
-
+                // Claimer label
                 ctx.font = "bold 12px Orbitron";
                 ctx.fillStyle = "#ff007f";
+                ctx.textAlign = "center";
                 const claimer = players[item.claimedBy]?.nameTag || "TAKEN";
                 ctx.fillText(claimer, item.menuX + item.w / 2, item.menuY + item.h / 2 + 4);
             } else {
-                ctx.fillStyle = item.color;
-                ctx.fillRect(item.menuX, item.menuY, item.w, item.h);
-                ctx.strokeStyle = "rgba(255,255,255,0.3)";
-                ctx.lineWidth = 2;
+                // Draw unclaimed block cells
+                item.blocks.forEach(cell => {
+                    const cx = item.menuX + cell.x;
+                    const cy = item.menuY + cell.y;
+                    ctx.fillStyle = item.color;
+                    ctx.fillRect(cx, cy, CELL_SIZE, CELL_SIZE);
+                    ctx.strokeStyle = "rgba(255,255,255,0.3)";
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(cx, cy, CELL_SIZE, CELL_SIZE);
+                });
+                // Optional bounding box outline
+                ctx.strokeStyle = "rgba(255,255,255,0.2)";
+                ctx.lineWidth = 1;
                 ctx.strokeRect(item.menuX, item.menuY, item.w, item.h);
             }
             ctx.restore();
         });
 
+        // --- Draw all cursors ---
         for (let id in placementCursors) {
             const cur = placementCursors[id];
             const pColor = players[id]?.color || '#ffffff';
@@ -1191,7 +1397,6 @@ function drawPlacementPhaseOverlay() {
             ctx.setLineDash([6, 4]);
             ctx.strokeRect(zone.x, zone.y, zone.w, zone.h);
             ctx.setLineDash([]);
-            // Label
             ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
             ctx.font = '12px Orbitron';
             ctx.textAlign = 'center';
@@ -1201,39 +1406,51 @@ function drawPlacementPhaseOverlay() {
             ctx.textBaseline = 'alphabetic';
         });
 
-        // --- Local player block preview ---
-        const myBlock = playerSelectedBlock[localPlayerId];
-        if (myBlock && localCur && !localCur.confirmed) {
-            const valid = validatePlacement(localCur.x, localCur.y, myBlock);
-            ctx.fillStyle = myBlock.color;
-            ctx.globalAlpha = valid ? 0.6 : 0.25;
-            ctx.fillRect(localCur.x, localCur.y, myBlock.w, myBlock.h);
-            ctx.strokeStyle = valid ? "#00ff66" : "#ff0000";
-            ctx.lineWidth = 3;
-            ctx.strokeRect(localCur.x, localCur.y, myBlock.w, myBlock.h);
+        const CELL_SIZE = 40; // each cell is 40x40
+
+        // Helper to draw a block (cells) with given alpha and optional outline
+        function drawBlock(block, x, y, alpha, outlineColor) {
+            if (!block || !block.blocks) return;
+            ctx.globalAlpha = alpha;
+            block.blocks.forEach(cell => {
+                const cx = x + cell.x;
+                const cy = y + cell.y;
+                ctx.fillStyle = block.color;
+                ctx.fillRect(cx, cy, CELL_SIZE, CELL_SIZE);
+                ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(cx, cy, CELL_SIZE, CELL_SIZE);
+            });
+            if (outlineColor) {
+                ctx.globalAlpha = 1.0;
+                ctx.strokeStyle = outlineColor;
+                ctx.lineWidth = 3;
+                ctx.strokeRect(x, y, block.w, block.h);
+            }
             ctx.globalAlpha = 1.0;
         }
 
-        // --- Draw other players' block projections ---
+        // --- Draw other players' block projections (with low alpha) ---
         for (let id in placementCursors) {
             if (id === localPlayerId) continue;
             const cur = placementCursors[id];
             if (cur.confirmed) continue;
             const block = playerSelectedBlock[id];
             if (!block) continue;
-
-            ctx.globalAlpha = 0.3;
-            ctx.fillStyle = block.color;
-            ctx.fillRect(cur.x, cur.y, block.w, block.h);
-            ctx.strokeStyle = "rgba(255,255,255,0.5)";
-            ctx.lineWidth = 1;
-            ctx.strokeRect(cur.x, cur.y, block.w, block.h);
-            ctx.globalAlpha = 1.0;
-
+            drawBlock(block, cur.x, cur.y, 0.3, null);
+            // Draw name above
             ctx.font = "10px Orbitron";
             ctx.fillStyle = "#fff";
             ctx.textAlign = "center";
             ctx.fillText(players[id]?.nameTag || "Player", cur.x + block.w / 2, cur.y - 5);
+        }
+
+        // --- Local player block preview (with validation) ---
+        const myBlock = playerSelectedBlock[localPlayerId];
+        if (myBlock && localCur && !localCur.confirmed) {
+            const valid = validatePlacement(localCur.x, localCur.y, myBlock);
+            const outlineColor = valid ? "#00ff66" : "#ff0000";
+            drawBlock(myBlock, localCur.x, localCur.y, valid ? 0.6 : 0.25, outlineColor);
         }
 
         // --- Draw all players' cursors and names ---
@@ -1255,6 +1472,10 @@ function drawPlacementPhaseOverlay() {
                 ctx.stroke();
             }
         }
+
+        ctx.font = "14px Share Tech Mono";
+        ctx.fillStyle = "#aaa";
+        ctx.fillText("Press R to rotate your block", BASE_WIDTH / 2, 110);
 
         ctx.restore();
 

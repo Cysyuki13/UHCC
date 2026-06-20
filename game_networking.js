@@ -16,7 +16,7 @@ function updateScoreboardButtonVisibility() {
     const btn = document.getElementById('toggle-scoreboard-btn');
     if (!btn) return;
     if (currentEngineMode === 'LOBBY' || currentEngineMode === 'GAME') {
-        btn.style.display = 'block';
+        btn.style.display = 'inline-block';
     } else {
         btn.style.display = 'none';
     }
@@ -140,6 +140,7 @@ function setupHostRoutingRules(conn) {
                     pl.facingRight = pkg.payload.facingRight;
                     pl.isDashing = pkg.payload.isDashing;
                     pl.handAngle = pkg.payload.handAngle;
+                    pl.jumpsLeft = pkg.payload.jumpsLeft;   // <-- ADD THIS
                     pl.lastSeen = Date.now();
                 }
                 broadcastToRoom('sync_players', { allPlayers: players });
@@ -217,7 +218,7 @@ function setupHostRoutingRules(conn) {
                         targetItem.claimedBy = pkg.senderId;
                         playerSelectedBlock[pkg.senderId] = targetItem;
                         placementCursors[pkg.senderId].confirmed = true;
-                        broadcastToRoom('sync_placement_pool', { pool: placementPool, selections: playerSelectedBlock });
+                        broadcastToRoom('sync_placement_pool', { pool: placementPool, selections: playerSelectedBlock, cursors: placementCursors });
                         if (Object.keys(players).every(id => placementCursors[id].confirmed)) {
                             matchPhase = 'PLACE';
                             Object.keys(placementCursors).forEach(id => placementCursors[id].confirmed = false);
@@ -229,31 +230,67 @@ function setupHostRoutingRules(conn) {
 
             case 'client_confirm_placement':
                 if (matchPhase === 'PLACE') {
-                    const block = playerSelectedBlock[pkg.senderId];
-                    if (block) {
-                        let collides = false;
-                        const px = pkg.payload.x;
-                        const py = pkg.payload.y;
-                        for (let plat of platforms) {
-                            if (px < plat.x + plat.w && px + block.w > plat.x && py < plat.y + plat.h && py + block.h > plat.y) {
-                                collides = true;
-                                break;
-                            }
-                        }
-                        if (!collides) {
-                            platforms.push({ x: px, y: py, w: block.w, h: block.h, color: block.color, isDynamicObject: true });
-                            placementCursors[pkg.senderId].confirmed = true;
-                            broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
-                            broadcastToRoom('sync_placement_cursors', { cursors: placementCursors });
-                            if (Object.keys(players).every(id => placementCursors[id].confirmed)) {
-                                matchPhase = 'PLAY';
-                                broadcastToRoom('match_phase_play', { phase: 'PLAY' });
-                                startOfficialMatchRun();
-                            }
-                        } else {
-                            conn.send({ type: 'placement_rejected', payload: { message: "Overlap detected!" } });
-                        }
+                    const px = pkg.payload.x;
+                    const py = pkg.payload.y;
+                    const senderId = pkg.senderId;
+                    const block = playerSelectedBlock[senderId];
+                    if (!block) {
+                        conn.send({ type: 'placement_rejected', payload: { message: "No block selected!" } });
+                        break;
                     }
+
+                    // Validate using the actual block's cells (reuse validatePlacement)
+                    if (!validatePlacement(px, py, block)) {
+                        conn.send({ type: 'placement_rejected', payload: { message: "Overlap or invalid position!" } });
+                        break;
+                    }
+
+                    // Place each cell as a separate platform
+                    const CELL_SIZE = 40;
+                    block.blocks.forEach(cell => {
+                        platforms.push({
+                            x: px + cell.x,
+                            y: py + cell.y,
+                            w: CELL_SIZE,
+                            h: CELL_SIZE,
+                            color: block.color,
+                            isDynamicObject: true,
+                            isPlacedCell: true
+                        });
+                    });
+
+                    placementCursors[senderId].confirmed = true;
+
+                    broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
+                    broadcastToRoom('sync_placement_cursors', { cursors: placementCursors });
+
+                    const allPlaced = Object.keys(players).every(id => placementCursors[id].confirmed);
+                    if (allPlaced) {
+                        matchPhase = 'PLAY';
+                        broadcastToRoom('match_phase_play', { phase: 'PLAY' });
+                        startOfficialMatchRun();
+                    }
+                }
+                break;
+            case 'client_rotate_block':
+                if ((matchPhase === 'CHOOSE' || matchPhase === 'PLACE') && playerSelectedBlock[pkg.senderId]) {
+                    const block = playerSelectedBlock[pkg.senderId];
+                    block.w = pkg.payload.w;
+                    block.h = pkg.payload.h;
+                    block.blocks = pkg.payload.blocks;
+
+                    if (placementCursors[pkg.senderId]) {
+                        placementCursors[pkg.senderId].x = pkg.payload.cursorX;
+                        placementCursors[pkg.senderId].y = pkg.payload.cursorY;
+                    }
+
+                    console.debug(`[HOST] Player ${pkg.senderId} rotated block: new size ${block.w}x${block.h}, cursor at (${placementCursors[pkg.senderId]?.x.toFixed(1)}, ${placementCursors[pkg.senderId]?.y.toFixed(1)})`);
+
+                    broadcastToRoom('sync_placement_pool', {
+                        pool: placementPool,
+                        selections: playerSelectedBlock,
+                        cursors: placementCursors
+                    });
                 }
                 break;
         }
@@ -354,6 +391,7 @@ function setupClientRoutingRules(conn) {
                             players[id].ammo = data.ammo;
                             players[id].eliminated = data.eliminated || false;
                             players[id].deathReason = data.deathReason || null;
+                            players[id].jumpsLeft = data.jumpsLeft;   // <-- ADD THIS
                         }
                     }
                 }
@@ -525,13 +563,18 @@ function setupClientRoutingRules(conn) {
             case 'sync_projectiles':
                 projectiles = pkg.payload.projectiles;
                 break;
-
             case 'sync_placement_cursors':
                 placementCursors = pkg.payload.cursors;
+                break;
+            case 'sync_placement_timer':
+                placementTimer = pkg.payload.value;
                 break;
             case 'sync_placement_pool':
                 placementPool = pkg.payload.pool;
                 playerSelectedBlock = pkg.payload.selections;
+                if (pkg.payload.cursors) {
+                    placementCursors = pkg.payload.cursors;
+                }
                 break;
             case 'transition_to_placement':
                 matchPhase = pkg.payload.phase;
@@ -627,6 +670,8 @@ function enterLobbyState() {
     firstPlayerFinishTime = -1;
     raceCountdownVal = -1;
     finishPositions = [];
+    camera.zoom = 1.0;
+    camera.targetZoom = 1.0;
     if (lobbyTimerId) clearInterval(lobbyTimerId);
     document.getElementById('menu-screen').classList.add('hidden');
     setupLobbyEnvironment();
@@ -648,6 +693,7 @@ function enterLobbyState() {
     document.getElementById('timer').innerText = timerVal;
     updateHudDisplays();
     updateScoreboardButtonVisibility();
+    updateTimerVisibility();
 }
 
 function evaluateLobbyDoorTrigger() {
@@ -793,11 +839,19 @@ function executeActiveMatchStart() {
         }
     }
 
+    // 🔥 Force sync the map to all clients (host only)
+    if (isHost) {
+        broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
+    }
+
     updateHudDisplays();
     raceStarted = false;
     firstPlayerFinishTime = -1;
     raceCountdownVal = -1;
     finishPositions = [];
+
+    camera.zoom = 1.0;
+    camera.targetZoom = 1.0;
 
     projectiles = [];
     throwables = [];
@@ -812,13 +866,11 @@ function executeActiveMatchStart() {
     playerSelectedBlock = {};
     placementCursors = {};
 
-    // Shuffle the shapes once for this match
     const shuffledShapes = shuffleArray(DRAFT_SHAPES);
 
-    // Helper: generate non‑overlapping random position
     function getRandomPosition(template, placedShapes) {
         const margin = 20;
-        const topMargin = 150; // keep away from the title text
+        const topMargin = 150;
         const maxX = BASE_WIDTH - template.w - margin;
         const maxY = BASE_HEIGHT - template.h - margin;
         let attempts = 0;
@@ -885,10 +937,27 @@ function executeActiveMatchStart() {
     if (isHost) {
         broadcastToRoom('sync_placement_pool', { pool: placementPool, selections: playerSelectedBlock });
         broadcastToRoom('sync_placement_cursors', { cursors: placementCursors });
+
+        // --- Start the 60-second draft timer ---
+        placementTimer = 60;
+        broadcastToRoom('sync_placement_timer', { value: placementTimer });
+
+        if (placementTimerInterval) clearInterval(placementTimerInterval);
+        placementTimerInterval = setInterval(() => {
+            placementTimer--;
+            broadcastToRoom('sync_placement_timer', { value: placementTimer });
+
+            if (placementTimer <= 0) {
+                clearInterval(placementTimerInterval);
+                placementTimerInterval = null;
+                autoAssignRemainingBlocks();
+            }
+        }, 1000);
     }
 
     console.log("%c[UHCC] Match started with DRAFT phase. Map: " + currentSelectedMapName, "color: #00f2fe; font-weight: bold;");
     updateScoreboardButtonVisibility();
+    updateTimerVisibility();
 }
 
 // ===== Host only: start actual gameplay after placement =====
@@ -1070,6 +1139,7 @@ function executeLobbyReturnSequence() {
     }
 
     updateResetButtonVisibility();
+    updateTimerVisibility();
 
     setTimeout(() => { isReturningToLobby = false; }, 500);
 }
@@ -2006,6 +2076,17 @@ function drawOffscreenRadarIndicators() {
     }
 }
 
+function updateTimerVisibility() {
+    const container = document.getElementById('timer-container');
+    if (!container) return;
+    // In LOBBY mode, hide the whole container; otherwise show it.
+    if (currentEngineMode === 'LOBBY') {
+        container.style.display = 'none';
+    } else {
+        container.style.display = 'flex';  // matches the original flex layout
+    }
+}
+
 function drawDashCooldownBar(p) {
     const w = p.width + 10, h = 3, x = p.x - 5, y = p.y - 12;
     ctx.fillStyle = 'rgba(11,6,18,0.7)'; ctx.fillRect(x, y, w, h);
@@ -2130,28 +2211,15 @@ function enginePipelineTick(timestamp) {
         updatePlacementPhases(dt);
 
         if (matchPhase === 'PLAY') {
+            // ─── 1. Local player physics & actions ──────────────────────────────
             if (localPlayer && !spectatorMode) {
                 updateCharacterPhysics(localPlayer, dt);
                 resolvePlayerCollisions();
-                if (currentEngineMode === 'GAME' && isHost) checkAndProcessRaceFinish();
                 if (isHost) {
-                    evaluateLobbyDoorTrigger();
                     localPlayer.handAngle = calculateHandAngle(localPlayer);
-                    broadcastToRoom('sync_players', { allPlayers: players });
-                } else {
-                    if (!localPlayer.grabbedBy) {
-                        hostConnection.send({
-                            type: 'client_input_update', senderId: localPlayerId,
-                            payload: {
-                                x: localPlayer.x, y: localPlayer.y, vx: localPlayer.vx, vy: localPlayer.vy,
-                                isGrounded: localPlayer.isGrounded, facingRight: localPlayer.facingRight,
-                                isDashing: localPlayer.isDashing, handAngle: calculateHandAngle(localPlayer),
-                                resetVersion: clientResetVersion
-                            }
-                        });
-                    }
                 }
 
+                // ── Item pickup (host or client) ──
                 if (itemManager) {
                     itemManager.update();
                     if (isHost && localPlayer) {
@@ -2175,6 +2243,8 @@ function enginePipelineTick(timestamp) {
                         }
                     }
                 }
+
+                // ── Drop item ──
                 if (keys.Drop && !wasDropPressed) {
                     if (localPlayer.item) {
                         if (!isHost && hostConnection?.open) {
@@ -2193,7 +2263,9 @@ function enginePipelineTick(timestamp) {
                 }
                 wasDropPressed = keys.Drop;
                 if (localPlayerItem) localPlayerItem.update(dt);
+
             } else if (localPlayer && spectatorMode) {
+                // ── Spectator camera follow ──
                 if (spectatorTargetId && players[spectatorTargetId]) {
                     updateCameraToTarget();
                 } else {
@@ -2203,6 +2275,41 @@ function enginePipelineTick(timestamp) {
                         updateCameraToTarget();
                     }
                 }
+            }
+
+            // ─── 2. Host authority: collisions, finish detection, broadcast ──────
+            if (isHost) {
+                resolvePlayerCollisions();          // Resolve all player‑player collisions
+                if (currentEngineMode === 'GAME') {
+                    checkAndProcessRaceFinish();    // Check finish line and end match
+                }
+                // Broadcast updated state after collisions
+                broadcastToRoom('sync_players', { allPlayers: players });
+            }
+
+            // ─── 3. Client sends input to host (if not grabbed) ──────────────────
+            if (!isHost && localPlayer && !localPlayer.grabbedBy) {
+                hostConnection.send({
+                    type: 'client_input_update',
+                    senderId: localPlayerId,
+                    payload: {
+                        x: localPlayer.x,
+                        y: localPlayer.y,
+                        vx: localPlayer.vx,
+                        vy: localPlayer.vy,
+                        isGrounded: localPlayer.isGrounded,
+                        facingRight: localPlayer.facingRight,
+                        isDashing: localPlayer.isDashing,
+                        handAngle: calculateHandAngle(localPlayer),
+                        jumpsLeft: localPlayer.jumpsLeft,   // <-- ADD THIS
+                        resetVersion: clientResetVersion
+                    }
+                });
+            }
+
+            // ─── 4. Lobby door trigger (host only) ──────────────────────────────
+            if (isHost && currentEngineMode === 'LOBBY') {
+                evaluateLobbyDoorTrigger();
             }
         }
 
@@ -2586,7 +2693,7 @@ function enginePipelineTick(timestamp) {
 
         drawPlacementPhaseOverlay();
 
-        if (currentEngineMode === 'LOBBY') {
+        if (currentEngineMode === 'LOBBY' || (currentEngineMode === 'GAME' && matchPhase === 'PLAY')) {
             drawLobbyScoreboard();
         }
 
@@ -2642,6 +2749,11 @@ window.addEventListener('keydown', (e) => {
     if ((e.key === 'r' || e.key === 'R') && currentEngineMode === 'LOBBY') {
         e.preventDefault();
         toggleReadyStatus();
+    }
+
+    if ((e.key === 'r' || e.key === 'R') && matchPhase === 'PLACE') {
+        e.preventDefault();
+        rotatePlayerBlock(localPlayerId);
     }
 
     if (spectatorMode && currentEngineMode === 'GAME') {
@@ -2730,29 +2842,29 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    const toggleBtn = document.createElement('button');
-    toggleBtn.id = 'toggle-scoreboard-btn';
-    toggleBtn.textContent = '📊';
-    toggleBtn.style.position = 'absolute';
-    toggleBtn.style.top = '15px';
-    toggleBtn.style.left = '200px';
-    toggleBtn.style.zIndex = '1000';
-    toggleBtn.style.padding = '8px 12px';
-    toggleBtn.style.backgroundColor = '#00f2fe';
-    toggleBtn.style.color = '#000';
-    toggleBtn.style.border = 'none';
-    toggleBtn.style.borderRadius = '8px';
-    toggleBtn.style.fontFamily = 'Orbitron, monospace';
-    toggleBtn.style.fontWeight = 'bold';
-    toggleBtn.style.cursor = 'pointer';
-    toggleBtn.style.boxShadow = '0 0 10px rgba(0,242,254,0.5)';
-    toggleBtn.style.display = 'none';
-    document.body.appendChild(toggleBtn);
-
-    toggleBtn.addEventListener('click', () => {
-        scoreboardVisible = !scoreboardVisible;
+    const statusContainer = document.querySelector('header .flex.items-center.gap-4');
+    if (statusContainer) {
+        const toggleBtn = document.createElement('button');
+        toggleBtn.id = 'toggle-scoreboard-btn';
         toggleBtn.textContent = '📊';
-    });
+        toggleBtn.style.padding = '4px 10px';
+        toggleBtn.style.backgroundColor = '#00f2fe';
+        toggleBtn.style.color = '#000';
+        toggleBtn.style.border = 'none';
+        toggleBtn.style.borderRadius = '6px';
+        toggleBtn.style.fontFamily = 'Orbitron, monospace';
+        toggleBtn.style.fontWeight = 'bold';
+        toggleBtn.style.fontSize = '14px';
+        toggleBtn.style.cursor = 'pointer';
+        toggleBtn.style.boxShadow = '0 0 10px rgba(0,242,254,0.5)';
+        toggleBtn.style.display = 'none'; // hidden by default
+        statusContainer.appendChild(toggleBtn);
+
+        toggleBtn.addEventListener('click', () => {
+            scoreboardVisible = !scoreboardVisible;
+            toggleBtn.textContent = '📊';
+        });
+    }
 
     const closeSettingsBtn = document.getElementById('close-settings-btn');
     if (closeSettingsBtn) {
