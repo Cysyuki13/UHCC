@@ -5,14 +5,24 @@ let matchPhase = 'PLAY'; // States: 'CHOOSE', 'PLACE', 'PLAY'
 let placementPool = [];   // Shared objects list available to draft
 let playerSelectedBlock = {}; // Mapping: { playerId: blockObject }
 let placementCursors = {};    // Mapping: { playerId: { x, y, confirmed } }
+let matchDuration = 120; // 120 秒 = 2 分钟
 
-// Draft timer (60 seconds) – only active on host
-let placementTimer = 60;
+// Draft timer (30 seconds) – only active on host
+let placementTimer = 30;
 let placementTimerInterval = null;
 
-// Track local clicks for selection triggers
-window.mouseJustClicked = false;
-window.addEventListener('mousedown', () => {
+// Placement timer (15 seconds) – only active on host
+let placementPlaceTimer = 15;
+let placementPlaceTimerInterval = null;
+
+// Track left‑click specifically for placement (button 0)
+window.leftMouseClicked = false;
+window.mouseJustClicked = false; // kept for CHOOSE phase & other uses
+
+window.addEventListener('mousedown', (e) => {
+    if (e.button === 0) {
+        window.leftMouseClicked = true;
+    }
     window.mouseJustClicked = true;
 });
 
@@ -86,12 +96,21 @@ function playRobotHandSound() {
 function playSound(type) {
     try {
         if (Tone.context.state !== "running") return;
+        if (matchEndingInProgress && type === 'tick') return;
+
+
         if (type === 'jump') synth.triggerAttackRelease("D4", "16n", undefined, 0.3);
         else if (type === 'gem') synth.triggerAttackRelease("B5", "16n", undefined, 0.4);
         else if (type === 'spike') synth.triggerAttackRelease("F2", "8n", undefined, 0.5);
         else if (type === 'door') {
             synth.triggerAttackRelease("A4", "16n", undefined, 0.4);
             synth.triggerAttackRelease("E5", "16n", "+0.08", 0.4);
+        }
+        else if (type === 'crouch') {
+            synth.triggerAttackRelease("G2", "8n", undefined, 0.3);
+        }
+        else if (type === 'tick') {
+            synth.triggerAttackRelease("C5", "32n", undefined, 0.2);
         }
     } catch (e) { console.warn(e); }
 }
@@ -363,6 +382,7 @@ function repositionAllPlayersToSpawnPoints() {
         players[id].knockbackVx = 0;
         players[id].knockbackVy = 0;
         players[id].grabbedBy = null;
+        players[id].isCrouching = false;
     }
 }
 
@@ -387,7 +407,7 @@ const PLAYER_COLORS = [
     '#8B4513', '#FFC0CB', '#800080', '#FFA500', '#808080', '#63c363'
 ];
 
-const keys = { ArrowLeft: false, ArrowRight: false, ArrowUp: false, ShiftLeft: false, Interact: false, Drop: false, KeyW: false, KeyA: false, KeyS: false, KeyD: false };
+const keys = { ArrowLeft: false, ArrowRight: false, ArrowUp: false, ShiftLeft: false, Interact: false, Drop: false, KeyW: false, KeyA: false, KeyS: false, KeyD: false, Crouch: false };
 const touchState = { left: false, right: false, jump: false };
 
 let mousePos = { x: 0, y: 0 };
@@ -530,12 +550,18 @@ function hostResetLobby() {
     lastRobotHandSnapshot = null;
 
     setupLobbyEnvironment();
+    repositionAllPlayersToSpawnPoints();
+
 
     if (lobbyTimerId) { clearInterval(lobbyTimerId); lobbyTimerId = null; }
     if (raceTimerId) { clearInterval(raceTimerId); raceTimerId = null; }
     if (placementTimerInterval) {
         clearInterval(placementTimerInterval);
         placementTimerInterval = null;
+    }
+    if (placementPlaceTimerInterval) {
+        clearInterval(placementPlaceTimerInterval);
+        placementPlaceTimerInterval = null;
     }
     lobbyCountdownVal = -1;
     raceCountdownVal = -1;
@@ -547,6 +573,10 @@ function hostResetLobby() {
     localPlayerItem = null;
     matchPhase = 'PLAY';
     resetVersion++;
+
+    timerVal = matchDuration;
+    document.getElementById('timer').innerText = timerVal;
+
     broadcastToRoom('sync_players', { allPlayers: players, reset: true });
     broadcastToRoom('sync_ready_players', { readyPlayers });
     broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
@@ -607,7 +637,10 @@ function createPlayerProfile(id, nameTag) {
         knockbackTimer: 0,
         knockbackVx: 0,
         knockbackVy: 0,
-        grabbedBy: null
+        grabbedBy: null,
+        isCrouching: false,
+        standHeight: CHARACTER_BASE_HEIGHT,
+        lastThrowableHitTime: 0
     };
 }
 
@@ -639,6 +672,8 @@ function voidRespawnLobby(player) {
     player.knockbackTimer = 0;
     player.knockbackVx = 0;
     player.knockbackVy = 0;
+    player.isCrouching = false;
+    player.height = player.standHeight || CHARACTER_BASE_HEIGHT;
     playSound('spike');
 }
 
@@ -649,7 +684,6 @@ function voidEliminateGame(player, reason) {
     player.item = null;
     player.itemType = null;
     player.ammo = 0;
-    player.knockbackTimer = 0;
     if (isHost) {
         activeRobotHands = activeRobotHands.filter(g => g.holderId !== player.id && g.targetId !== player.id);
         for (let id in players) {
@@ -883,15 +917,11 @@ function initializePlacementPhase() {
 function autoAssignRemainingBlocks() {
     if (!isHost || matchPhase !== 'CHOOSE') return;
 
-    // Find players who haven't chosen yet
     const playersWithoutBlock = Object.keys(players).filter(id => !playerSelectedBlock[id]);
-
-    // Get all unclaimed blocks
     const unclaimedBlocks = placementPool.filter(b => !b.claimedBy);
 
     playersWithoutBlock.forEach((id, index) => {
         if (unclaimedBlocks.length === 0) return;
-        // Pick the first unclaimed block (or cycle through)
         const blockIndex = index % unclaimedBlocks.length;
         const block = unclaimedBlocks.splice(blockIndex, 1)[0];
         block.claimedBy = id;
@@ -899,16 +929,18 @@ function autoAssignRemainingBlocks() {
         if (placementCursors[id]) placementCursors[id].confirmed = true;
     });
 
-    // Broadcast updated pool
-    broadcastToRoom('sync_placement_pool', { pool: placementPool, selections: playerSelectedBlock, cursors: placementCursors });    // Check if everyone now has a block
+    broadcastToRoom('sync_placement_pool', { pool: placementPool, selections: playerSelectedBlock, cursors: placementCursors });
     const allChosen = Object.keys(players).every(id => playerSelectedBlock[id] !== undefined);
     if (allChosen) {
-        // Stop timer if still running
         if (placementTimerInterval) {
             clearInterval(placementTimerInterval);
             placementTimerInterval = null;
         }
         matchPhase = 'PLACE';
+        // 重置左键点击状态，防止进入 PLACE 时立即触发
+        window.leftMouseClicked = false;
+        window.mouseJustClicked = false;
+
         Object.keys(placementCursors).forEach(id => {
             placementCursors[id].confirmed = false;
             if (spawnPoints.length > 0) {
@@ -921,8 +953,79 @@ function autoAssignRemainingBlocks() {
         });
         broadcastToRoom('transition_to_placement', { phase: 'PLACE', cursors: placementCursors });
         broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
+        // 启动放置计时器
+        startPlacementPlaceTimer();
     }
 }
+
+// ============================================================================
+//  PLACEMENT PLACE TIMER (15 seconds)
+// ============================================================================
+function startPlacementPlaceTimer() {
+    if (!isHost) return;
+    if (matchPhase !== 'PLACE') return;
+    if (placementPlaceTimerInterval) return;
+
+    placementPlaceTimer = 15;
+    broadcastToRoom('sync_placement_place_timer', { value: placementPlaceTimer });
+
+    placementPlaceTimerInterval = setInterval(() => {
+        placementPlaceTimer--;
+        broadcastToRoom('sync_placement_place_timer', { value: placementPlaceTimer });
+
+        if (placementPlaceTimer <= 5 && placementPlaceTimer > 0) {
+            playSound('tick');
+        }
+
+        if (placementPlaceTimer <= 0) {
+            clearInterval(placementPlaceTimerInterval);
+            placementPlaceTimerInterval = null;
+            forceFinishPlacement();
+        }
+    }, 1000);
+}
+
+function forceFinishPlacement() {
+    if (!isHost || matchPhase !== 'PLACE') return;
+    // 将所有未确认的玩家标记为已确认（不实际放置）
+    let anyUnconfirmed = false;
+    for (let id in placementCursors) {
+        if (!placementCursors[id].confirmed) {
+            placementCursors[id].confirmed = true;
+            anyUnconfirmed = true;
+        }
+    }
+    if (anyUnconfirmed) {
+        broadcastToRoom('sync_placement_cursors', { cursors: placementCursors });
+        // 检查是否所有玩家都已确认
+        const allPlaced = Object.keys(players).every(id => placementCursors[id].confirmed);
+        if (allPlaced) {
+            matchPhase = 'PLAY';
+            broadcastToRoom('match_phase_play', { phase: 'PLAY' });
+            startOfficialMatchRun();
+        }
+    }
+}
+
+// ============================================================================
+//  LEFT‑CLICK ICON (loaded from external SVG file)
+// ============================================================================
+let leftClickIconImg = null;
+
+function loadLeftClickIcon() {
+    const img = new Image();
+    img.src = 'assets/icons/left_click_icon.svg'; // 路径根据你的实际目录调整
+    img.onload = () => {
+        console.log('[UI] Left‑click icon loaded successfully.');
+    };
+    img.onerror = () => {
+        console.warn('[UI] Failed to load left‑click icon, using fallback drawing.');
+    };
+    return img;
+}
+
+// Load the icon once
+leftClickIconImg = loadLeftClickIcon();
 
 function updatePlacementPhases(dt) {
     if (currentEngineMode !== 'GAME' || matchPhase === 'PLAY') return;
@@ -986,19 +1089,26 @@ function updatePlacementPhases(dt) {
         sendPlacementCursorUpdate(cursor.x, cursor.y);
     }
 
-    // Handle placement / selection on click or E
-    if (keys.Interact || window.mouseJustClicked) {
-        if (keys.Interact) keys.Interact = false;
-        if (window.mouseJustClicked) window.mouseJustClicked = false;
+    // ─── Handle placement / selection ──────────────────────────────────────────
+    // CHOOSE phase: any click (mouseJustClicked) OR Interact key
+    if (matchPhase === 'CHOOSE') {
+        if (keys.Interact || window.mouseJustClicked) {
+            if (keys.Interact) keys.Interact = false;
+            if (window.mouseJustClicked) window.mouseJustClicked = false;
 
-        if (matchPhase === 'CHOOSE') {
             const item = placementPool.find(p =>
                 cursor.x >= p.menuX && cursor.x <= p.menuX + p.w &&
                 cursor.y >= p.menuY && cursor.y <= p.menuY + p.h &&
                 p.claimedBy === null
             );
             if (item) selectBlockRequest(item.id);
-        } else if (matchPhase === 'PLACE') {
+        }
+    }
+    // PLACE phase: ONLY left‑click (no keyboard, no right/middle click)
+    else if (matchPhase === 'PLACE') {
+        if (window.leftMouseClicked) {
+            window.leftMouseClicked = false; // consume the click
+
             const block = playerSelectedBlock[localPlayerId];
             if (block) {
                 if (validatePlacement(cursor.x, cursor.y, block)) {
@@ -1177,12 +1287,15 @@ function handleHostBlockClaim(playerId, blockId) {
 
         const allChosen = Object.keys(players).every(id => playerSelectedBlock[id] !== undefined);
         if (allChosen) {
-            // Stop the draft timer
             if (placementTimerInterval) {
                 clearInterval(placementTimerInterval);
                 placementTimerInterval = null;
             }
             matchPhase = 'PLACE';
+            // 重置左键点击状态
+            window.leftMouseClicked = false;
+            window.mouseJustClicked = false;
+
             Object.keys(placementCursors).forEach(id => {
                 placementCursors[id].confirmed = false;
                 if (spawnPoints.length > 0) {
@@ -1195,6 +1308,8 @@ function handleHostBlockClaim(playerId, blockId) {
             });
             broadcastToRoom('transition_to_placement', { phase: 'PLACE', cursors: placementCursors });
             broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
+            // 启动放置计时器
+            startPlacementPlaceTimer();
         }
     }
 }
@@ -1222,6 +1337,11 @@ function handleHostPlacementConfirm(playerId, px, py) {
 
             const allPlaced = Object.keys(players).every(id => placementCursors[id].confirmed);
             if (allPlaced) {
+                // 清除放置计时器
+                if (placementPlaceTimerInterval) {
+                    clearInterval(placementPlaceTimerInterval);
+                    placementPlaceTimerInterval = null;
+                }
                 matchPhase = 'PLAY';
                 broadcastToRoom('match_phase_play', { phase: 'PLAY' });
                 startOfficialMatchRun();
@@ -1231,7 +1351,12 @@ function handleHostPlacementConfirm(playerId, px, py) {
 }
 
 function startOfficialMatchRun() {
-    timerVal = 60;
+    // 清除放置计时器（如果有）
+    if (placementPlaceTimerInterval) {
+        clearInterval(placementPlaceTimerInterval);
+        placementPlaceTimerInterval = null;
+    }
+    timerVal = matchDuration; // 使用设置的时长
     if (gameTimer) clearInterval(gameTimer);
     gameTimer = setInterval(() => {
         timerVal--;
@@ -1243,7 +1368,7 @@ function startOfficialMatchRun() {
 }
 
 // ============================================================================
-//  DRAFT OVERLAY RENDERING
+//  DRAFT OVERLAY RENDERING (with left‑click icon during PLACE phase)
 // ============================================================================
 
 function drawPlacementPhaseOverlay() {
@@ -1270,7 +1395,7 @@ function drawPlacementPhaseOverlay() {
         ctx.fillRect(barX, barY, barW, barH);
 
         // Progress (fraction remaining)
-        const progress = Math.max(0, placementTimer / 60);
+        const progress = Math.max(0, placementTimer / 30); // 30 seconds
         let barColor;
         if (progress > 0.5) {
             barColor = "#00ff66";        // green
@@ -1473,19 +1598,92 @@ function drawPlacementPhaseOverlay() {
             }
         }
 
-        ctx.font = "14px Share Tech Mono";
-        ctx.fillStyle = "#aaa";
-        ctx.fillText("Press R to rotate your block", BASE_WIDTH / 2, 110);
-
         ctx.restore();
 
-        // UI text
+        // ─── 在屏幕坐标系绘制 UI（与相机无关） ──────────────────────────────
+
+        // 主标题
         ctx.font = "bold 24px Orbitron";
         ctx.fillStyle = "#ffcc00";
         ctx.textAlign = "center";
         ctx.fillText("PLACE YOUR BLOCK ON THE MAP", BASE_WIDTH / 2, 50);
+
+        // ─── 放置进度条（同 CHOOSE 样式） ──────────────────────────────
+        const barX = 0;
+        const barY = 70;
+        const barW = BASE_WIDTH;
+        const barH = 5;
+
+        ctx.fillStyle = "rgba(0,0,0,0.7)";
+        ctx.fillRect(barX, barY, barW, barH);
+
+        const progress = Math.max(0, placementPlaceTimer / 15);
+        let barColor;
+        if (progress > 0.5) barColor = "#00ff66";
+        else if (progress > 0.25) barColor = "#ffcc00";
+        else barColor = "#ff3333";
+        ctx.fillStyle = barColor;
+        ctx.fillRect(barX, barY, barW * progress, barH);
+
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(barX, barY, barW, barH);
+
+        // ─── 左键点击提示（图标 + 文字） ──────────────────────────────────
+        const iconSize = 32;
+        const iconX = BASE_WIDTH / 2 - 140;
+        const iconY = 85;
+
+        if (leftClickIconImg && leftClickIconImg.complete && leftClickIconImg.naturalWidth > 0) {
+            ctx.drawImage(leftClickIconImg, iconX, iconY, iconSize, iconSize);
+        } else {
+            // 备用绘制...
+            ctx.fillStyle = "#00f2fe";
+            ctx.beginPath();
+            ctx.moveTo(iconX + 4, iconY + 4);
+            ctx.lineTo(iconX + 4, iconY + iconSize - 8);
+            ctx.lineTo(iconX + 12, iconY + iconSize - 16);
+            ctx.lineTo(iconX + 20, iconY + iconSize - 4);
+            ctx.lineTo(iconX + 26, iconY + iconSize - 10);
+            ctx.lineTo(iconX + 16, iconY + iconSize - 20);
+            ctx.lineTo(iconX + iconSize - 8, iconY + 4);
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+            ctx.fillStyle = "#ff007f";
+            ctx.beginPath();
+            ctx.arc(iconX + iconSize - 6, iconY + 6, 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "bold 8px Orbitron";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("L", iconX + iconSize - 6, iconY + 7);
+            ctx.textBaseline = "alphabetic";
+        }
+
+        ctx.font = "bold 16px Orbitron";
+        ctx.fillStyle = "#00f2fe";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText("LEFT CLICK TO PLACE", iconX + iconSize + 12, iconY + iconSize / 2);
+        ctx.textBaseline = "alphabetic";
+
         ctx.font = "14px Share Tech Mono";
-        ctx.fillStyle = "#ddd";
-        ctx.fillText("Cannot overlap existing components or safe zones. Click or press E to place.", BASE_WIDTH / 2, 80);
+        ctx.fillStyle = "#aaa";
+        ctx.textAlign = "center";
+        ctx.fillText("Press R to rotate your block", BASE_WIDTH / 2, iconY + iconSize + 20);
+
+        if (myBlock && localCur && !localCur.confirmed) {
+            const valid = validatePlacement(localCur.x, localCur.y, myBlock);
+            if (!valid) {
+                ctx.font = "14px Orbitron";
+                ctx.fillStyle = "#ff3333";
+                ctx.textAlign = "center";
+                ctx.fillText("⚠️ Invalid position – overlaps safe zone or existing object", BASE_WIDTH / 2, iconY + iconSize + 45);
+            }
+        }
     }
 }

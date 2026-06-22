@@ -79,7 +79,7 @@ class pistolItem extends UsableItem {
         super('pistol', 'assets/items/pistol.svg', 0.75);
         this.projectileSpeed = window.PISTOL_PROJECTILE_SPEED || 36;
         this.projectileRadius = 6;
-        this.knockbackForce = 15;
+        this.knockbackForce = 30;
         this.ammo = ammo;
         this.maxAmmo = 3;
     }
