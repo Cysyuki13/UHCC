@@ -15,6 +15,8 @@ let placementTimerInterval = null;
 let placementPlaceTimer = 15;
 let placementPlaceTimerInterval = null;
 
+const BOMB_DRAFT_SCALE = 2.0;   // adjust to your liking (1.5–2.5)
+
 // Track left‑click specifically for placement (button 0)
 window.leftMouseClicked = false;
 window.mouseJustClicked = false; // kept for CHOOSE phase & other uses
@@ -26,26 +28,13 @@ window.addEventListener('mousedown', (e) => {
     window.mouseJustClicked = true;
 });
 
-// Tetris-like shape grid configurations for placement
-const DRAFT_SHAPES = [
-    { type: 'I_BLOCK', w: 160, h: 40, color: '#00f2fe', blocks: [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 80, y: 0 }, { x: 120, y: 0 }] },
-    { type: 'O_BLOCK', w: 80, h: 80, color: '#ffcc00', blocks: [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 0, y: 40 }, { x: 40, y: 40 }] },
-    { type: 'T_BLOCK', w: 120, h: 80, color: '#aa66ff', blocks: [{ x: 40, y: 0 }, { x: 0, y: 40 }, { x: 40, y: 40 }, { x: 80, y: 40 }] },
-    { type: 'L_BLOCK', w: 80, h: 120, color: '#ff9900', blocks: [{ x: 0, y: 0 }, { x: 0, y: 40 }, { x: 0, y: 80 }, { x: 40, y: 80 }] },
-    { type: 'Z_BLOCK', w: 120, h: 80, color: '#ff007f', blocks: [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 40 }, { x: 80, y: 40 }] }
-];
-
-// ------------------------------------------------------------------
-// Shuffle helper – ensures the draft menu order is random each match
-// ------------------------------------------------------------------
-function shuffleArray(arr) {
-    const a = [...arr];
-    for (let i = a.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [a[i], a[j]] = [a[j], a[i]];
-    }
-    return a;
-}
+// ============================================================================
+//  BOMB GLOBALS
+// ============================================================================
+let previousRoundHadFinisher = false;   // true if last match had at least one finisher
+let previousRoundFinishersCount = 0;
+let activeBombs = [];                  // list of placed bombs waiting to explode
+let lastBombSnapshot = null;
 
 // ============================================================================
 //  SOUND & UI
@@ -135,6 +124,26 @@ function performShoot() {
     if (!localPlayerItem) return;
     if (players[localPlayerId]?.eliminated) return;
 
+    // ─── 新增：机器人手角度限制检查（主机与客户端统一） ───
+    if (localPlayerItem.name === 'robot_hand') {
+        const player = players[localPlayerId];
+        const angle = calculateHandAngle(player);
+        const facingAngle = player.facingRight ? 0 : Math.PI;
+        let diff = angle - facingAngle;
+        while (diff > Math.PI) diff -= 2 * Math.PI;
+        while (diff < -Math.PI) diff += 2 * Math.PI;
+        const MAX_ANGLE_OFFSET = (60 * Math.PI) / 180;
+        if (Math.abs(diff) > MAX_ANGLE_OFFSET) {
+            // 播放空手枪音效
+            if (emptyPistolSound) {
+                emptyPistolSound.currentTime = 0;
+                emptyPistolSound.play().catch(e => console.warn("Empty pistol sound play failed:", e));
+            }
+            return; // 阻止发射
+        }
+    }
+
+    // 其他已有检查...
     if (localPlayerItem.name === 'robot_hand' && activeRobotHands.some(g => g.holderId === localPlayerId)) {
         console.warn("[RobotHand] Already have an active grab, cannot shoot again.");
         return;
@@ -150,19 +159,7 @@ function performShoot() {
 
     if (!localPlayerItem.canUse()) return;
 
-    if (!isHost && localPlayerItem.name === 'robot_hand') {
-        const angle = calculateHandAngle(players[localPlayerId]);
-        const facingAngle = players[localPlayerId].facingRight ? 0 : Math.PI;
-        let diff = angle - facingAngle;
-        while (diff > Math.PI) diff -= 2 * Math.PI;
-        while (diff < -Math.PI) diff += 2 * Math.PI;
-        const MAX_ANGLE_OFFSET = (60 * Math.PI) / 180;
-        if (Math.abs(diff) > MAX_ANGLE_OFFSET) {
-            console.warn(`[RobotHand] Client blocked shoot: angle ${angle.toFixed(2)} out of range.`);
-            return;
-        }
-    }
-
+    // 主机处理逻辑
     if (isHost) {
         const gameState = { projectiles, activeRobotHands, mouseWorld: getMouseWorldPos() };
         const used = localPlayerItem.onUse(players[localPlayerId], gameState);
@@ -178,6 +175,7 @@ function performShoot() {
             if (!players[localPlayerId].item) localPlayerItem = null;
         }
     } else {
+        // 客户端处理：移除了原先重复的角度检查（现已统一处理）
         const isRobotHand = (localPlayerItem.name === 'robot_hand');
         const isPistol = (localPlayerItem.name === 'pistol');
 
@@ -390,6 +388,9 @@ let particles = [];
 let bulletImage = new Image();
 bulletImage.src = 'assets/items/pistol_bullet.svg';
 
+let bombImage = new Image();
+bombImage.src = 'assets/objects/bomb.svg';
+
 let faceImageCache = {};
 let lastTime = 0;
 
@@ -400,7 +401,7 @@ let camera = {
 
 let skinDoor = { x: 220, y: 390, w: 70, h: 110, color: '#ff007f' };
 let lobbyDoor = { x: 1150, y: 530, w: 70, h: 110, color: '#ffcc00' };
-let finishLine = { x: 1150, y: 550, w: 70, h: 80, color: '#00ff66' };
+let finishLine = { x: 1150, y: 550, w: 100, h: 5, color: '#00ff66' };
 
 const PLAYER_COLORS = [
     '#FF0000', '#0000FF', '#000000', '#ffffff', '#FF69B4', '#00FFFF',
@@ -545,9 +546,11 @@ function hostResetLobby() {
     projectiles = [];
     throwables = [];
     activeRobotHands = [];
+    activeBombs = [];
     lastThrowableSnapshot = null;
     lastProjectileSnapshot = null;
     lastRobotHandSnapshot = null;
+    lastBombSnapshot = null;
 
     setupLobbyEnvironment();
     repositionAllPlayersToSpawnPoints();
@@ -584,6 +587,7 @@ function hostResetLobby() {
     broadcastToRoom('sync_throwables', { throwables });
     broadcastProjectiles();
     broadcastRobotHands();
+    broadcastBombs();
     broadcastToRoom('sync_lobby_countdown', { value: -1 });
 
     playSound('door');
@@ -679,8 +683,16 @@ function voidRespawnLobby(player) {
 
 function voidEliminateGame(player, reason) {
     if (player.eliminated) return;
+
     player.eliminated = true;
     player.deathReason = reason || 'unknown';
+
+    player.vx = 0;
+    player.vy = 0;
+    player.knockbackTimer = 0;
+    player.knockbackVx = 0;
+    player.knockbackVy = 0;
+
     player.item = null;
     player.itemType = null;
     player.ammo = 0;
@@ -751,6 +763,14 @@ function broadcastRobotHands() {
     if (snap === lastRobotHandSnapshot) return;
     lastRobotHandSnapshot = snap;
     broadcastToRoom('sync_robot_hands', { activeRobotHands });
+}
+
+function broadcastBombs() {
+    if (!isHost) return;
+    const snap = JSON.stringify(activeBombs);
+    if (snap === lastBombSnapshot) return;
+    lastBombSnapshot = snap;
+    broadcastToRoom('sync_bombs', { activeBombs });
 }
 
 function spawnBreakParticles(x, y) {
@@ -1314,12 +1334,71 @@ function handleHostBlockClaim(playerId, blockId) {
     }
 }
 
+// ============================================================================
+//  BOMB EXPLOSION HANDLING (HOST ONLY)
+// ============================================================================
+
+function triggerBombExplosion(bomb) {
+    const cx = bomb.x + 20;   // center of 40×40 cell
+    const cy = bomb.y + 20;
+    const radius = bomb.radius;
+
+    // Collect indices of player‑placed platforms within radius (including other bombs)
+    const toRemove = [];
+    for (let i = 0; i < platforms.length; i++) {
+        const plat = platforms[i];
+        if (!plat.isPlacedBlock) continue;   // ignore original map platforms
+        const platCx = plat.x + plat.w / 2;
+        const platCy = plat.y + plat.h / 2;
+        const dist = Math.hypot(platCx - cx, platCy - cy);
+        if (dist < radius) {
+            toRemove.push(i);
+        }
+    }
+
+    // Remove platforms (reverse order to keep indices valid)
+    toRemove.sort((a, b) => b - a);
+    for (let idx of toRemove) {
+        platforms.splice(idx, 1);
+    }
+
+    // Spawn explosion particles
+    for (let i = 0; i < 60; i++) {
+        const angle = Math.random() * 2 * Math.PI;
+        const speed = 2 + Math.random() * 6;
+        pushParticle({
+            type: 'spark',
+            x: cx, y: cy,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 0.6 + Math.random() * 0.6,
+            age: 0,
+            size: Math.random() * 5 + 3,
+            color: '#ff6600',
+            alpha: 1
+        });
+    }
+
+    // Remove this bomb from the active list
+    const idx = activeBombs.indexOf(bomb);
+    if (idx !== -1) activeBombs.splice(idx, 1);
+
+    // Broadcast updated map and bomb state
+    broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
+    broadcastBombs();
+    console.log(`[Bomb] Explosion at (${cx},${cy}) radius ${radius}, removing ${toRemove.length} blocks`);
+
+    playSound('spike');
+}
+
 function handleHostPlacementConfirm(playerId, px, py) {
     if (matchPhase !== 'PLACE') return;
     const block = playerSelectedBlock[playerId];
     if (block && placementCursors[playerId] && !placementCursors[playerId].confirmed) {
         if (validatePlacement(px, py, block)) {
             const CELL_SIZE = 40;
+            const isBomb = (block.type === 'bomb');
+
             block.blocks.forEach(cell => {
                 platforms.push({
                     x: px + cell.x,
@@ -1327,9 +1406,25 @@ function handleHostPlacementConfirm(playerId, px, py) {
                     w: CELL_SIZE,
                     h: CELL_SIZE,
                     color: block.color,
-                    isPlacedBlock: true
+                    isPlacedBlock: true,
+                    isBomb: isBomb,
+                    bombRadius: block.radius || 150
                 });
             });
+
+            if (isBomb) {
+                console.log(`[Bomb] Host: Bomb placed at (${px}, ${py}) by player ${playerId}`);
+                activeBombs.push({
+                    x: px,
+                    y: py,
+                    radius: block.radius || 150,
+                    timer: 0.5,
+                    ownerId: playerId
+                });
+                console.log(`[Bomb] activeBombs now length: ${activeBombs.length}`);
+                broadcastBombs();
+            }
+
             placementCursors[playerId].confirmed = true;
 
             broadcastToRoom('sync_map', { platforms, hazards, gems, cameraBounds, voidYThreshold });
@@ -1387,32 +1482,24 @@ function drawPlacementPhaseOverlay() {
         // --- Progress bar for the timer ---
         const barX = 0;
         const barY = 115;
-        const barW = BASE_WIDTH;  // 880px wide, centered
+        const barW = BASE_WIDTH;
         const barH = 5;
 
-        // Background
         ctx.fillStyle = "rgba(0,0,0,0.7)";
         ctx.fillRect(barX, barY, barW, barH);
 
-        // Progress (fraction remaining)
-        const progress = Math.max(0, placementTimer / 30); // 30 seconds
+        const progress = Math.max(0, placementTimer / 30);
         let barColor;
-        if (progress > 0.5) {
-            barColor = "#00ff66";        // green
-        } else if (progress > 0.25) {
-            barColor = "#ffcc00";        // yellow
-        } else {
-            barColor = "#ff3333";        // red
-        }
+        if (progress > 0.5) barColor = "#00ff66";
+        else if (progress > 0.25) barColor = "#ffcc00";
+        else barColor = "#ff3333";
         ctx.fillStyle = barColor;
         ctx.fillRect(barX, barY, barW * progress, barH);
 
-        // Border
         ctx.strokeStyle = "#ffffff";
         ctx.lineWidth = 0.5;
         ctx.strokeRect(barX, barY, barW, barH);
 
-        // Timer text inside the bar
         ctx.fillStyle = "#ffffff";
         ctx.font = "bold 16px Orbitron";
         ctx.textAlign = "center";
@@ -1424,41 +1511,54 @@ function drawPlacementPhaseOverlay() {
         placementPool.forEach(item => {
             ctx.save();
             const CELL_SIZE = 40;
+            const isBomb = (item.type === 'bomb');
+
             if (item.claimedBy) {
-                // Draw cells with reduced alpha
                 ctx.globalAlpha = 0.5;
-                item.blocks.forEach(cell => {
-                    const cx = item.menuX + cell.x;
-                    const cy = item.menuY + cell.y;
-                    ctx.fillStyle = item.color;
-                    ctx.fillRect(cx, cy, CELL_SIZE, CELL_SIZE);
-                    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-                    ctx.lineWidth = 1;
-                    ctx.strokeRect(cx, cy, CELL_SIZE, CELL_SIZE);
-                });
+                if (isBomb && bombImage.complete) {
+                    const scaledW = item.w * BOMB_DRAFT_SCALE;
+                    const scaledH = item.h * BOMB_DRAFT_SCALE;
+                    const dx = item.menuX + (item.w - scaledW) / 2;
+                    const dy = item.menuY + (item.h - scaledH) / 2;
+                    ctx.drawImage(bombImage, dx, dy, scaledW, scaledH);
+                } else {
+                    item.blocks.forEach(cell => {
+                        const cx = item.menuX + cell.x;
+                        const cy = item.menuY + cell.y;
+                        ctx.fillStyle = item.color;
+                        ctx.fillRect(cx, cy, CELL_SIZE, CELL_SIZE);
+                        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+                        ctx.lineWidth = 1;
+                        ctx.strokeRect(cx, cy, CELL_SIZE, CELL_SIZE);
+                    });
+                }
                 ctx.globalAlpha = 1;
-                // Outline to show it's claimed
                 ctx.strokeStyle = "#ff007f";
                 ctx.lineWidth = 2;
                 ctx.strokeRect(item.menuX, item.menuY, item.w, item.h);
-                // Claimer label
                 ctx.font = "bold 12px Orbitron";
                 ctx.fillStyle = "#ff007f";
                 ctx.textAlign = "center";
                 const claimer = players[item.claimedBy]?.nameTag || "TAKEN";
                 ctx.fillText(claimer, item.menuX + item.w / 2, item.menuY + item.h / 2 + 4);
             } else {
-                // Draw unclaimed block cells
-                item.blocks.forEach(cell => {
-                    const cx = item.menuX + cell.x;
-                    const cy = item.menuY + cell.y;
-                    ctx.fillStyle = item.color;
-                    ctx.fillRect(cx, cy, CELL_SIZE, CELL_SIZE);
-                    ctx.strokeStyle = "rgba(255,255,255,0.3)";
-                    ctx.lineWidth = 1;
-                    ctx.strokeRect(cx, cy, CELL_SIZE, CELL_SIZE);
-                });
-                // Optional bounding box outline
+                if (isBomb && bombImage.complete) {
+                    const scaledW = item.w * BOMB_DRAFT_SCALE;
+                    const scaledH = item.h * BOMB_DRAFT_SCALE;
+                    const dx = item.menuX + (item.w - scaledW) / 2;
+                    const dy = item.menuY + (item.h - scaledH) / 2;
+                    ctx.drawImage(bombImage, dx, dy, scaledW, scaledH);
+                } else {
+                    item.blocks.forEach(cell => {
+                        const cx = item.menuX + cell.x;
+                        const cy = item.menuY + cell.y;
+                        ctx.fillStyle = item.color;
+                        ctx.fillRect(cx, cy, CELL_SIZE, CELL_SIZE);
+                        ctx.strokeStyle = "rgba(255,255,255,0.3)";
+                        ctx.lineWidth = 1;
+                        ctx.strokeRect(cx, cy, CELL_SIZE, CELL_SIZE);
+                    });
+                }
                 ctx.strokeStyle = "rgba(255,255,255,0.2)";
                 ctx.lineWidth = 1;
                 ctx.strokeRect(item.menuX, item.menuY, item.w, item.h);
@@ -1474,11 +1574,9 @@ function drawPlacementPhaseOverlay() {
             ctx.beginPath();
             ctx.arc(cur.x, cur.y, 10, 0, Math.PI * 2);
             ctx.fill();
-
             ctx.font = "10px Orbitron";
             ctx.fillStyle = "#fff";
             ctx.fillText(players[id]?.nameTag || "Player", cur.x, cur.y - 15);
-
             if (cur.confirmed) {
                 ctx.strokeStyle = "#00ff66";
                 ctx.lineWidth = 3;
@@ -1490,25 +1588,19 @@ function drawPlacementPhaseOverlay() {
     } else if (matchPhase === 'PLACE') {
         const localCur = placementCursors[localPlayerId];
         if (localCur) {
-            // --- SMOOTH CAMERA FOLLOW ---
             const CAM_LERP = 0.07;
             let targetCamX = localCur.x - BASE_WIDTH / 2;
             let targetCamY = localCur.y - BASE_HEIGHT / 2;
-
             const maxWorldCamX = WORLD_WIDTH - BASE_WIDTH;
             const maxWorldCamY = WORLD_HEIGHT - BASE_HEIGHT;
-
             targetCamX = Math.max(cameraBounds.minX, Math.min(targetCamX, maxWorldCamX));
             targetCamY = Math.max(cameraBounds.minY, Math.min(targetCamY, maxWorldCamY));
-
             camera.x += (targetCamX - camera.x) * CAM_LERP;
             camera.y += (targetCamY - camera.y) * CAM_LERP;
-
             camera.x = Math.max(cameraBounds.minX, Math.min(camera.x, cameraBounds.maxX - BASE_WIDTH));
             camera.y = Math.max(cameraBounds.minY, Math.min(camera.y, cameraBounds.maxY - BASE_HEIGHT));
         }
 
-        // Draw the world with the current camera
         ctx.save();
         ctx.translate(-camera.x, -camera.y);
 
@@ -1531,21 +1623,24 @@ function drawPlacementPhaseOverlay() {
             ctx.textBaseline = 'alphabetic';
         });
 
-        const CELL_SIZE = 40; // each cell is 40x40
+        const CELL_SIZE = 40;
 
-        // Helper to draw a block (cells) with given alpha and optional outline
         function drawBlock(block, x, y, alpha, outlineColor) {
             if (!block || !block.blocks) return;
             ctx.globalAlpha = alpha;
-            block.blocks.forEach(cell => {
-                const cx = x + cell.x;
-                const cy = y + cell.y;
-                ctx.fillStyle = block.color;
-                ctx.fillRect(cx, cy, CELL_SIZE, CELL_SIZE);
-                ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-                ctx.lineWidth = 1;
-                ctx.strokeRect(cx, cy, CELL_SIZE, CELL_SIZE);
-            });
+            if (block.type === 'bomb' && bombImage.complete) {
+                ctx.drawImage(bombImage, x, y, block.w, block.h);
+            } else {
+                block.blocks.forEach(cell => {
+                    const cx = x + cell.x;
+                    const cy = y + cell.y;
+                    ctx.fillStyle = block.color;
+                    ctx.fillRect(cx, cy, CELL_SIZE, CELL_SIZE);
+                    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(cx, cy, CELL_SIZE, CELL_SIZE);
+                });
+            }
             if (outlineColor) {
                 ctx.globalAlpha = 1.0;
                 ctx.strokeStyle = outlineColor;
@@ -1555,7 +1650,7 @@ function drawPlacementPhaseOverlay() {
             ctx.globalAlpha = 1.0;
         }
 
-        // --- Draw other players' block projections (with low alpha) ---
+        // --- Other players' projections ---
         for (let id in placementCursors) {
             if (id === localPlayerId) continue;
             const cur = placementCursors[id];
@@ -1563,22 +1658,39 @@ function drawPlacementPhaseOverlay() {
             const block = playerSelectedBlock[id];
             if (!block) continue;
             drawBlock(block, cur.x, cur.y, 0.3, null);
-            // Draw name above
             ctx.font = "10px Orbitron";
             ctx.fillStyle = "#fff";
             ctx.textAlign = "center";
             ctx.fillText(players[id]?.nameTag || "Player", cur.x + block.w / 2, cur.y - 5);
         }
 
-        // --- Local player block preview (with validation) ---
+        // --- Local player preview ---
         const myBlock = playerSelectedBlock[localPlayerId];
         if (myBlock && localCur && !localCur.confirmed) {
             const valid = validatePlacement(localCur.x, localCur.y, myBlock);
             const outlineColor = valid ? "#00ff66" : "#ff0000";
             drawBlock(myBlock, localCur.x, localCur.y, valid ? 0.6 : 0.25, outlineColor);
+
+            if (myBlock.type === 'bomb') {
+                const centerX = localCur.x + myBlock.w / 2;
+                const centerY = localCur.y + myBlock.h / 2;
+                const radius = myBlock.radius || 150;
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+                ctx.strokeStyle = 'rgba(255, 0, 0, 0.4)';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([6, 8]);
+                ctx.stroke();
+                ctx.restore();
+                ctx.fillStyle = 'rgba(255,0,0,0.7)';
+                ctx.font = '12px Orbitron';
+                ctx.textAlign = 'center';
+                ctx.fillText('💥 BOMB', centerX, centerY - radius - 10);
+            }
         }
 
-        // --- Draw all players' cursors and names ---
+        // --- All cursors ---
         for (let id in placementCursors) {
             const cur = placementCursors[id];
             const pColor = players[id]?.color || '#ffffff';
@@ -1600,23 +1712,15 @@ function drawPlacementPhaseOverlay() {
 
         ctx.restore();
 
-        // ─── 在屏幕坐标系绘制 UI（与相机无关） ──────────────────────────────
-
-        // 主标题
+        // --- UI overlay (screen coordinates) ---
         ctx.font = "bold 24px Orbitron";
         ctx.fillStyle = "#ffcc00";
         ctx.textAlign = "center";
         ctx.fillText("PLACE YOUR BLOCK ON THE MAP", BASE_WIDTH / 2, 50);
 
-        // ─── 放置进度条（同 CHOOSE 样式） ──────────────────────────────
-        const barX = 0;
-        const barY = 70;
-        const barW = BASE_WIDTH;
-        const barH = 5;
-
+        const barX = 0, barY = 70, barW = BASE_WIDTH, barH = 5;
         ctx.fillStyle = "rgba(0,0,0,0.7)";
         ctx.fillRect(barX, barY, barW, barH);
-
         const progress = Math.max(0, placementPlaceTimer / 15);
         let barColor;
         if (progress > 0.5) barColor = "#00ff66";
@@ -1624,20 +1728,15 @@ function drawPlacementPhaseOverlay() {
         else barColor = "#ff3333";
         ctx.fillStyle = barColor;
         ctx.fillRect(barX, barY, barW * progress, barH);
-
         ctx.strokeStyle = "#ffffff";
         ctx.lineWidth = 0.5;
         ctx.strokeRect(barX, barY, barW, barH);
 
-        // ─── 左键点击提示（图标 + 文字） ──────────────────────────────────
-        const iconSize = 32;
-        const iconX = BASE_WIDTH / 2 - 140;
-        const iconY = 85;
-
+        const iconSize = 32, iconX = BASE_WIDTH / 2 - 140, iconY = 85;
         if (leftClickIconImg && leftClickIconImg.complete && leftClickIconImg.naturalWidth > 0) {
             ctx.drawImage(leftClickIconImg, iconX, iconY, iconSize, iconSize);
         } else {
-            // 备用绘制...
+            // fallback
             ctx.fillStyle = "#00f2fe";
             ctx.beginPath();
             ctx.moveTo(iconX + 4, iconY + 4);
@@ -1663,7 +1762,6 @@ function drawPlacementPhaseOverlay() {
             ctx.fillText("L", iconX + iconSize - 6, iconY + 7);
             ctx.textBaseline = "alphabetic";
         }
-
         ctx.font = "bold 16px Orbitron";
         ctx.fillStyle = "#00f2fe";
         ctx.textAlign = "left";

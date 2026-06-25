@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>UHCC – Map Creator (Safe Zones added)</title>
+    <title>UHCC – Map Creator (with Void Threshold)</title>
     <style>
         * {
             user-select: none;
@@ -399,18 +399,21 @@
             🎯 Axis lock while moving: hold <strong>Shift</strong> while dragging or using arrow keys.<br>
             ⭐ Spawn points: up to 6, will be used as player starting positions.<br>
             🛡️ Safe Zone: define areas where players cannot place blocks during the draft phase.<br>
-            🎥 Camera bounds: define the rectangle where the camera is allowed to pan (players can still move beyond).
+            🎥 Camera bounds: define the rectangle where the camera is allowed to pan (players can still move
+            beyond).<br>
+            ⬇️ Void Threshold: red dashed line shows where players fall into the void.
         </p>
     </div>
 
     <script>
-        // ---------- VIRTUAL MAP SIZE (3x original) ----------
-        const VIRTUAL_WIDTH = 3840;   // 3 * 1280
-        const VIRTUAL_HEIGHT = 2160;  // 3 * 720
+        // ---------- VIRTUAL MAP SIZE ----------
+        const VIRTUAL_WIDTH = 3840;
+        const VIRTUAL_HEIGHT = 2160;
         const VIEW_WIDTH = 1280;
         const VIEW_HEIGHT = 720;
+        const DEFAULT_VOID_THRESHOLD = 2000;
 
-        // Viewport position (top-left of visible area in virtual coordinates)
+        // Viewport position
         let viewX = 0, viewY = 0;
         let zoom = 1.0;
         const MIN_ZOOM = 0.3;
@@ -420,22 +423,16 @@
         let isPanning = false;
         let panStartX = 0, panStartY = 0;
         let panStartViewX = 0, panStartViewY = 0;
-
-        // Axis lock state for dragging
         let dragAxisLock = false;
         let dragLockAxis = null;
         let dragStartPos = null;
-
-        // Space key state for panning
         let spacePressed = false;
 
         // ---------- DATA MODELS ----------
         let currentMapType = "lobby";
 
-        // Default camera bounds (full world)
         const DEFAULT_CAMERA_BOUNDS = { minX: 0, minY: 0, maxX: VIRTUAL_WIDTH, maxY: VIRTUAL_HEIGHT };
 
-        // Lobby data
         let lobbyData = {
             platforms: [
                 { x: 0, y: 640, w: 1280, h: 40 },
@@ -461,10 +458,10 @@
             finishLine: null,
             cameraBounds: { ...DEFAULT_CAMERA_BOUNDS },
             scoreboard: { x: 50, y: 50, w: 250, h: 200 },
-            safeZones: []  // NEW
+            safeZones: [],
+            voidYThreshold: DEFAULT_VOID_THRESHOLD
         };
 
-        // Match data
         let matchData = {
             platforms: [],
             hazards: [],
@@ -474,7 +471,8 @@
             skinDoor: null,
             lobbyDoor: null,
             cameraBounds: { ...DEFAULT_CAMERA_BOUNDS },
-            safeZones: []  // NEW
+            safeZones: [],
+            voidYThreshold: DEFAULT_VOID_THRESHOLD
         };
 
         let activeTool = "select";
@@ -482,8 +480,6 @@
         let showGrid = true;
         let snapMove = false;
         let selectedObj = null;
-
-        // Current active camera bounds (synced with current map)
         let currentCameraBounds = { ...DEFAULT_CAMERA_BOUNDS };
 
         // ---------- UNDO / REDO ----------
@@ -519,6 +515,7 @@
             else matchData = previous;
             currentCameraBounds = getCurrentData().cameraBounds || { ...DEFAULT_CAMERA_BOUNDS };
             updateCameraBoundsUI();
+            updateVoidThresholdUI();
             if (currentMapType === "lobby") updateScoreboardUI();
             clearSelection();
             render();
@@ -535,6 +532,7 @@
             else matchData = next;
             currentCameraBounds = getCurrentData().cameraBounds || { ...DEFAULT_CAMERA_BOUNDS };
             updateCameraBoundsUI();
+            updateVoidThresholdUI();
             if (currentMapType === "lobby") updateScoreboardUI();
             clearSelection();
             render();
@@ -561,8 +559,8 @@
             }
         }
 
-        // --- Live preview for size fields (no auto-save) ---
-        document.getElementById('selW').addEventListener('input', function() {
+        // --- Live preview for size fields ---
+        document.getElementById('selW').addEventListener('input', function () {
             if (!selectedObj) return;
             const newW = parseInt(this.value);
             if (!isNaN(newW) && newW > 0 && selectedObj.ref.w !== undefined) {
@@ -571,7 +569,7 @@
             }
         });
 
-        document.getElementById('selH').addEventListener('input', function() {
+        document.getElementById('selH').addEventListener('input', function () {
             if (!selectedObj) return;
             const newH = parseInt(this.value);
             if (!isNaN(newH) && newH > 0 && selectedObj.ref.h !== undefined) {
@@ -580,7 +578,7 @@
             }
         });
 
-        // Camera bounds UI functions
+        // ---------- Camera Bounds UI ----------
         function updateCameraBoundsUI() {
             document.getElementById('camMinX').value = currentCameraBounds.minX;
             document.getElementById('camMinY').value = currentCameraBounds.minY;
@@ -623,12 +621,34 @@
             applyCameraBoundsFromUI();
         };
 
-        document.getElementById('camMinX').addEventListener('change', applyCameraBoundsFromUI);
-        document.getElementById('camMinY').addEventListener('change', applyCameraBoundsFromUI);
-        document.getElementById('camMaxX').addEventListener('change', applyCameraBoundsFromUI);
-        document.getElementById('camMaxY').addEventListener('change', applyCameraBoundsFromUI);
+        ['camMinX', 'camMinY', 'camMaxX', 'camMaxY'].forEach(id => {
+            document.getElementById(id).addEventListener('change', applyCameraBoundsFromUI);
+        });
 
-        // ---------- SCOREBOARD UI ----------
+        // ---------- Void Threshold UI ----------
+        function updateVoidThresholdUI() {
+            const data = getCurrentData();
+            const val = data.voidYThreshold !== undefined ? data.voidYThreshold : DEFAULT_VOID_THRESHOLD;
+            document.getElementById('voidThreshold').value = val;
+        }
+
+        function applyVoidThresholdFromUI() {
+            const val = parseInt(document.getElementById('voidThreshold').value);
+            if (isNaN(val) || val < 0) return;
+            const data = getCurrentData();
+            data.voidYThreshold = val;
+            saveState();
+            render();
+        }
+
+        document.getElementById('voidThreshold').addEventListener('change', applyVoidThresholdFromUI);
+        document.getElementById('setVoidFromViewBtn').onclick = () => {
+            const bottom = viewY + VIEW_HEIGHT / zoom;
+            document.getElementById('voidThreshold').value = Math.round(bottom);
+            applyVoidThresholdFromUI();
+        };
+
+        // ---------- Scoreboard UI ----------
         function updateScoreboardUI() {
             if (currentMapType !== "lobby") return;
             const sb = lobbyData.scoreboard || { x: 50, y: 50, w: 250, h: 200 };
@@ -638,35 +658,28 @@
             document.getElementById('scoreH').value = sb.h;
         }
 
-        document.getElementById('scoreX').addEventListener('change', () => {
-            if (currentMapType !== "lobby") return;
-            lobbyData.scoreboard.x = parseInt(document.getElementById('scoreX').value) || 50;
-            saveState();
+        ['scoreX', 'scoreY', 'scoreW', 'scoreH'].forEach(id => {
+            document.getElementById(id).addEventListener('change', () => {
+                if (currentMapType !== "lobby") return;
+                lobbyData.scoreboard = {
+                    x: parseInt(document.getElementById('scoreX').value) || 50,
+                    y: parseInt(document.getElementById('scoreY').value) || 50,
+                    w: parseInt(document.getElementById('scoreW').value) || 250,
+                    h: parseInt(document.getElementById('scoreH').value) || 200
+                };
+                saveState();
+            });
         });
-        document.getElementById('scoreY').addEventListener('change', () => {
-            if (currentMapType !== "lobby") return;
-            lobbyData.scoreboard.y = parseInt(document.getElementById('scoreY').value) || 50;
-            saveState();
-        });
-        document.getElementById('scoreW').addEventListener('change', () => {
-            if (currentMapType !== "lobby") return;
-            lobbyData.scoreboard.w = parseInt(document.getElementById('scoreW').value) || 250;
-            saveState();
-        });
-        document.getElementById('scoreH').addEventListener('change', () => {
-            if (currentMapType !== "lobby") return;
-            lobbyData.scoreboard.h = parseInt(document.getElementById('scoreH').value) || 200;
-            saveState();
-        });
+
         document.getElementById('resetScoreboardBtn').onclick = () => {
             if (currentMapType !== "lobby") return;
             lobbyData.scoreboard = { x: 50, y: 50, w: 250, h: 200 };
             updateScoreboardUI();
             saveState();
+            render();
         };
 
-        // ---------- END SCOREBOARD UI ----------
-
+        // ---------- Move / Select helpers ----------
         function applyManualMove() {
             if (!selectedObj) return;
             let newX = parseInt(document.getElementById('selX').value);
@@ -686,7 +699,8 @@
 
         function moveSelected(dx, dy, constrainToArrowKey = false, axis = null) {
             if (!selectedObj) return;
-            let stepX = dx, stepY = dy;
+            let stepX = dx,
+                stepY = dy;
             if (snapMove) {
                 stepX = Math.round(stepX / 20) * 20;
                 stepY = Math.round(stepY / 20) * 20;
@@ -709,15 +723,17 @@
             updateSelectedInputs();
         }
 
+        // ---------- Object detection ----------
         function findObjectUnderMouse(mx, my) {
             const data = getCurrentData();
             // Spawn points
             for (let i = 0; i < data.spawnPoints.length; i++) {
                 const s = data.spawnPoints[i];
-                const dx = mx - s.x, dy = my - s.y;
+                const dx = mx - s.x,
+                    dy = my - s.y;
                 if (Math.hypot(dx, dy) < 12) return { type: "spawn", index: i, ref: s };
             }
-            // Safe zones (new)
+            // Safe zones
             for (let i = 0; i < data.safeZones.length; i++) {
                 const z = data.safeZones[i];
                 if (mx >= z.x && mx <= z.x + z.w && my >= z.y && my <= z.y + z.h)
@@ -736,10 +752,11 @@
                 if (data.settingsDoor && mx >= data.settingsDoor.x && mx <= data.settingsDoor.x + data.settingsDoor.w && my >= data.settingsDoor.y && my <= data.settingsDoor.y + data.settingsDoor.h)
                     return { type: "settingsDoor", index: -1, ref: data.settingsDoor };
             }
-            // Gems (circles)
+            // Gems
             for (let i = 0; i < data.gems.length; i++) {
                 const g = data.gems[i];
-                const dx = mx - g.x, dy = my - g.y;
+                const dx = mx - g.x,
+                    dy = my - g.y;
                 if (Math.hypot(dx, dy) < 12) return { type: "gem", index: i, ref: g };
             }
             // Hazards
@@ -762,7 +779,7 @@
             if (obj.type === "hazard") data.hazards.splice(obj.index, 1);
             if (obj.type === "gem") data.gems.splice(obj.index, 1);
             if (obj.type === "spawn") data.spawnPoints.splice(obj.index, 1);
-            if (obj.type === "safeZone") data.safeZones.splice(obj.index, 1); // NEW
+            if (obj.type === "safeZone") data.safeZones.splice(obj.index, 1);
             if (obj.type === "finish" && currentMapType === "match") data.finishLine = null;
             if (obj.type === "skinDoor" && currentMapType === "lobby") data.skinDoor = null;
             if (obj.type === "lobbyDoor" && currentMapType === "lobby") data.lobbyDoor = null;
@@ -773,7 +790,8 @@
         }
 
         function addObjectAt(virtualX, virtualY) {
-            let x = virtualX, y = virtualY;
+            let x = virtualX,
+                y = virtualY;
             if (snapEnabled) {
                 x = Math.round(x / 20) * 20;
                 y = Math.round(y / 20) * 20;
@@ -796,7 +814,7 @@
                     }
                     data.spawnPoints.push({ id: data.spawnPoints.length + 1, x, y });
                     break;
-                case "safeZone": // NEW
+                case "safeZone":
                     data.safeZones.push({ x, y, w: 120, h: 80 });
                     break;
                 case "skinDoor":
@@ -816,7 +834,7 @@
             render();
         }
 
-        // ---------- IMPORT MAP with camera bounds and safeZones ----------
+        // ---------- IMPORT MAP ----------
         function validateAndImport(jsonObj) {
             if (typeof jsonObj !== 'object' || jsonObj === null) throw new Error("Invalid JSON object");
             const isLobby = currentMapType === "lobby";
@@ -830,15 +848,17 @@
                 if (!jsonObj.finishLine && jsonObj.finishLine !== null) throw new Error("Missing 'finishLine' for match map");
             }
             const bounds = jsonObj.cameraBounds || { minX: 0, minY: 0, maxX: VIRTUAL_WIDTH, maxY: VIRTUAL_HEIGHT };
-            // NEW: read safeZones
             const safeZones = Array.isArray(jsonObj.safeZones) ? jsonObj.safeZones : [];
+            const voidYThreshold = jsonObj.voidYThreshold !== undefined ? jsonObj.voidYThreshold : DEFAULT_VOID_THRESHOLD;
+
             const newData = {
                 platforms: jsonObj.platforms.map(p => ({ x: p.x, y: p.y, w: p.w, h: p.h })),
                 hazards: jsonObj.hazards.map(h => ({ x: h.x, y: h.y, w: h.w, h: h.h })),
                 gems: jsonObj.gems.map(g => ({ id: g.id || Date.now() + Math.random(), x: g.x, y: g.y, collected: false })),
                 spawnPoints: spawnPoints.map(s => ({ id: s.id || Date.now() + Math.random(), x: s.x, y: s.y })),
                 cameraBounds: { minX: bounds.minX, minY: bounds.minY, maxX: bounds.maxX, maxY: bounds.maxY },
-                safeZones: safeZones.map(z => ({ x: z.x, y: z.y, w: z.w, h: z.h })) // NEW
+                safeZones: safeZones.map(z => ({ x: z.x, y: z.y, w: z.w, h: z.h })),
+                voidYThreshold: voidYThreshold
             };
             if (isLobby) {
                 newData.skinDoor = jsonObj.doors.skinDoor ? { ...jsonObj.doors.skinDoor, color: '#ff007f' } : null;
@@ -866,6 +886,7 @@
                 currentCameraBounds = newData.cameraBounds;
                 updateCameraBoundsUI();
             }
+            updateVoidThresholdUI();
             saveState();
             clearSelection();
             render();
@@ -882,7 +903,7 @@
             }
         }
 
-        // ----- Canvas events with pan/zoom, axis lock, space pan, wheel zoom -----
+        // ---------- Canvas events with pan/zoom ----------
         const canvas = document.getElementById('mapCanvas');
         const ctx = canvas.getContext('2d');
         const minimapCanvas = document.getElementById('minimapCanvas');
@@ -1042,8 +1063,14 @@
             const delta = e.deltaY > 0 ? -0.1 : 0.1;
             setZoom(zoom + delta);
         });
-        canvas.addEventListener('touchstart', (e) => { e.preventDefault(); onMouseDown(e); });
-        canvas.addEventListener('touchmove', (e) => { e.preventDefault(); onMouseMove(e); });
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            onMouseDown(e);
+        });
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            onMouseMove(e);
+        });
         canvas.addEventListener('touchend', onMouseUp);
 
         // Keyboard shortcuts
@@ -1058,7 +1085,8 @@
             }
             if (e.ctrlKey && e.key === 'z') {
                 e.preventDefault();
-                if (e.shiftKey) redo(); else undo();
+                if (e.shiftKey) redo();
+                else undo();
                 return;
             }
             if (e.ctrlKey && (e.key === 'y' || (e.key === 'Z' && e.shiftKey))) {
@@ -1068,12 +1096,25 @@
             }
             if (!selectedObj) return;
             const step = e.shiftKey ? 10 : (e.ctrlKey ? 20 : 1);
-            let dx = 0, dy = 0;
+            let dx = 0,
+                dy = 0;
             let axis = null;
-            if (e.key === 'ArrowLeft') { dx = -step; axis = 'x'; }
-            if (e.key === 'ArrowRight') { dx = step; axis = 'x'; }
-            if (e.key === 'ArrowUp') { dy = -step; axis = 'y'; }
-            if (e.key === 'ArrowDown') { dy = step; axis = 'y'; }
+            if (e.key === 'ArrowLeft') {
+                dx = -step;
+                axis = 'x';
+            }
+            if (e.key === 'ArrowRight') {
+                dx = step;
+                axis = 'x';
+            }
+            if (e.key === 'ArrowUp') {
+                dy = -step;
+                axis = 'y';
+            }
+            if (e.key === 'ArrowDown') {
+                dy = step;
+                axis = 'y';
+            }
             if (dx !== 0 || dy !== 0) {
                 e.preventDefault();
                 moveSelected(dx, dy, true, axis);
@@ -1135,7 +1176,7 @@
             document.getElementById('viewCoords').innerText = `${Math.round(viewX)},${Math.round(viewY)}`;
         }
 
-        // Drawing with pan and zoom
+        // ---------- Drawing ----------
         function drawGrid() {
             if (!showGrid) return;
             ctx.save();
@@ -1222,21 +1263,17 @@
             ctx.restore();
         }
 
-        // NEW: draw safe zone
         function drawSafeZone(z) {
             ctx.save();
             ctx.scale(zoom, zoom);
             ctx.translate(-viewX, -viewY);
-            // Translucent red fill
             ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
             ctx.fillRect(z.x, z.y, z.w, z.h);
-            // Dashed border
             ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
             ctx.lineWidth = 2 / zoom;
             ctx.setLineDash([6, 4]);
             ctx.strokeRect(z.x, z.y, z.w, z.h);
             ctx.setLineDash([]);
-            // Label
             ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
             ctx.font = `bold ${14 / zoom}px Orbitron`;
             ctx.textAlign = 'center';
@@ -1249,6 +1286,82 @@
                 ctx.strokeRect(z.x - 2, z.y - 2, z.w + 4, z.h + 4);
             }
             ctx.restore();
+        }
+
+        // ---------- Main render ----------
+        function render() {
+            ctx.clearRect(0, 0, VIEW_WIDTH, VIEW_HEIGHT);
+            drawGrid();
+            // ---------- 绘制相机边界 ----------
+            const bounds = currentCameraBounds;
+            ctx.save();
+            ctx.scale(zoom, zoom);
+            ctx.translate(-viewX, -viewY);
+
+            // 虚线矩形框
+            ctx.strokeStyle = '#00f2fe';
+            ctx.lineWidth = 2 / zoom;
+            ctx.setLineDash([6, 4]);
+            ctx.strokeRect(bounds.minX, bounds.minY, bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
+            ctx.setLineDash([]);
+
+            // 标签文字
+            ctx.fillStyle = '#00f2fe';
+            ctx.font = `bold ${14 / zoom}px monospace`;
+            ctx.fillText('📷 Camera Bounds', bounds.minX + 5, bounds.minY - 5);
+
+            ctx.restore();
+            const data = getCurrentData();
+            data.platforms.forEach(p => drawRect(p, "#3a2a5a"));
+            data.hazards.forEach(h => drawRect(h, "#ff003c"));
+            data.gems.forEach(g => drawGem(g));
+            data.spawnPoints.forEach(s => drawSpawnPoint(s));
+            data.safeZones.forEach(z => drawSafeZone(z));
+            if (currentMapType === "lobby") {
+                if (data.skinDoor) drawRect(data.skinDoor, "#ff007f", true);
+                if (data.lobbyDoor) drawRect(data.lobbyDoor, "#ffcc00", true);
+                if (data.settingsDoor) drawRect(data.settingsDoor, "#aa66ff", true);
+            }
+            if (currentMapType === "match" && data.finishLine) {
+                ctx.save();
+                ctx.scale(zoom, zoom);
+                ctx.translate(-viewX, -viewY);
+                ctx.fillStyle = "#00ff66";
+                ctx.fillRect(data.finishLine.x, data.finishLine.y, data.finishLine.w, data.finishLine.h);
+                ctx.fillStyle = "white";
+                ctx.font = `bold ${12 / zoom}px Orbitron`;
+                ctx.fillText("FINISH", data.finishLine.x + data.finishLine.w / 2 - 25, data.finishLine.y + data.finishLine.h / 2 + 5);
+                if (selectedObj && selectedObj.ref === data.finishLine) {
+                    ctx.strokeStyle = "#ffcc00";
+                    ctx.lineWidth = 4 / zoom;
+                    ctx.strokeRect(data.finishLine.x - 2, data.finishLine.y - 2, data.finishLine.w + 4, data.finishLine.h + 4);
+                }
+                ctx.restore();
+            }
+
+            // Draw void threshold line
+            const threshold = data.voidYThreshold !== undefined ? data.voidYThreshold : DEFAULT_VOID_THRESHOLD;
+            if (threshold > 0 && threshold < VIRTUAL_HEIGHT) {
+                ctx.save();
+                ctx.scale(zoom, zoom);
+                ctx.translate(-viewX, -viewY);
+                ctx.strokeStyle = 'rgba(255, 0, 0, 0.7)';
+                ctx.lineWidth = 2 / zoom;
+                ctx.setLineDash([10, 8]);
+                ctx.beginPath();
+                ctx.moveTo(0, threshold);
+                ctx.lineTo(VIRTUAL_WIDTH, threshold);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = 'rgba(255, 0, 0, 0.8)';
+                ctx.font = `bold ${16 / zoom}px monospace`;
+                ctx.fillText(`⬇️ VOID THRESHOLD ${threshold}`, 10, threshold - 10);
+                ctx.restore();
+            }
+
+            updateObjectListUI();
+            updateCurrentMapPreview();
+            drawMinimap();
         }
 
         function drawMinimap() {
@@ -1276,7 +1389,6 @@
                 minimapCtx.fillStyle = "#FFD966";
                 minimapCtx.fillRect(s.x * scaleX - 3, s.y * scaleY - 3, 6, 6);
             });
-            // Safe zones (NEW)
             data.safeZones.forEach(z => {
                 minimapCtx.fillStyle = "rgba(255,0,0,0.5)";
                 minimapCtx.fillRect(z.x * scaleX, z.y * scaleY, z.w * scaleX, z.h * scaleY);
@@ -1312,42 +1424,7 @@
             minimapCtx.strokeRect(vpX, vpY, vpW, vpH);
         }
 
-        function render() {
-            ctx.clearRect(0, 0, VIEW_WIDTH, VIEW_HEIGHT);
-            drawGrid();
-            const data = getCurrentData();
-            data.platforms.forEach(p => drawRect(p, "#3a2a5a"));
-            data.hazards.forEach(h => drawRect(h, "#ff003c"));
-            data.gems.forEach(g => drawGem(g));
-            data.spawnPoints.forEach(s => drawSpawnPoint(s));
-            // Safe zones
-            data.safeZones.forEach(z => drawSafeZone(z));
-            if (currentMapType === "lobby") {
-                if (data.skinDoor) drawRect(data.skinDoor, "#ff007f", true);
-                if (data.lobbyDoor) drawRect(data.lobbyDoor, "#ffcc00", true);
-                if (data.settingsDoor) drawRect(data.settingsDoor, "#aa66ff", true);
-            }
-            if (currentMapType === "match" && data.finishLine) {
-                ctx.save();
-                ctx.scale(zoom, zoom);
-                ctx.translate(-viewX, -viewY);
-                ctx.fillStyle = "#00ff66";
-                ctx.fillRect(data.finishLine.x, data.finishLine.y, data.finishLine.w, data.finishLine.h);
-                ctx.fillStyle = "white";
-                ctx.font = `bold ${12 / zoom}px Orbitron`;
-                ctx.fillText("FINISH", data.finishLine.x + data.finishLine.w / 2 - 25, data.finishLine.y + data.finishLine.h / 2 + 5);
-                if (selectedObj && selectedObj.ref === data.finishLine) {
-                    ctx.strokeStyle = "#ffcc00";
-                    ctx.lineWidth = 4 / zoom;
-                    ctx.strokeRect(data.finishLine.x - 2, data.finishLine.y - 2, data.finishLine.w + 4, data.finishLine.h + 4);
-                }
-                ctx.restore();
-            }
-            updateObjectListUI();
-            updateCurrentMapPreview();
-            drawMinimap();
-        }
-
+        // ---------- UI updates ----------
         function updateObjectListUI() {
             const container = document.getElementById('objectList');
             const data = getCurrentData();
@@ -1368,7 +1445,6 @@
             data.spawnPoints.forEach((s, idx) => {
                 html += `<div class="object-item">S${idx + 1} (${Math.round(s.x)},${Math.round(s.y)}) <button onclick="deleteObjectByIndex('spawn',${idx})">X</button></div>`;
             });
-            // Safe zones
             html += `<div><strong>🛡️ Safe Zones (${data.safeZones.length})</strong></div>`;
             data.safeZones.forEach((z, idx) => {
                 html += `<div class="object-item">SZ${idx} (${Math.round(z.x)},${Math.round(z.y)} ${z.w}x${z.h}) <button onclick="deleteObjectByIndex('safeZone',${idx})">X</button></div>`;
@@ -1383,7 +1459,6 @@
             container.innerHTML = html;
         }
 
-        // Override deleteObjectByIndex to support safeZone
         window.deleteObjectByIndex = function (type, idx) {
             const data = getCurrentData();
             if (type === 'platform') data.platforms.splice(idx, 1);
@@ -1395,7 +1470,23 @@
             saveState();
             render();
         };
-        // keep door and finish deletion functions as before
+
+        window.deleteDoor = function (type) {
+            const data = getCurrentData();
+            if (type === 'skin') data.skinDoor = null;
+            if (type === 'lobby') data.lobbyDoor = null;
+            if (type === 'settings') data.settingsDoor = null;
+            saveState();
+            render();
+        };
+
+        window.deleteFinishLine = function () {
+            if (currentMapType === "match") {
+                matchData.finishLine = null;
+                saveState();
+                render();
+            }
+        };
 
         function setActiveTool(toolId) {
             activeTool = toolId;
@@ -1421,20 +1512,34 @@
         document.getElementById('toolLobbyDoor').onclick = () => setActiveTool('lobbyDoor');
         document.getElementById('toolSettingsDoor').onclick = () => setActiveTool('settingsDoor');
         document.getElementById('toolFinish').onclick = () => setActiveTool('finish');
-        document.getElementById('snapToggle').onclick = function () { snapEnabled = !snapEnabled; this.textContent = snapEnabled ? "🔘 Snap ON" : "🔘 Snap OFF"; };
-        document.getElementById('showGrid').onchange = (e) => { showGrid = e.target.checked; render(); };
+        document.getElementById('snapToggle').onclick = function () {
+            snapEnabled = !snapEnabled;
+            this.textContent = snapEnabled ? "🔘 Snap ON" : "🔘 Snap OFF";
+        };
+        document.getElementById('showGrid').onchange = (e) => {
+            showGrid = e.target.checked;
+            render();
+        };
         document.getElementById('clearAllBtn').onclick = () => {
             if (confirm(`Clear all ${currentMapType} objects?`)) {
                 const empty = {
-                    platforms: [], hazards: [], gems: [], spawnPoints: [],
-                    skinDoor: null, lobbyDoor: null, settingsDoor: null, finishLine: null,
+                    platforms: [],
+                    hazards: [],
+                    gems: [],
+                    spawnPoints: [],
+                    skinDoor: null,
+                    lobbyDoor: null,
+                    settingsDoor: null,
+                    finishLine: null,
                     cameraBounds: { ...DEFAULT_CAMERA_BOUNDS },
-                    safeZones: []  // keep empty array
+                    safeZones: [],
+                    voidYThreshold: DEFAULT_VOID_THRESHOLD
                 };
                 if (currentMapType === "lobby") lobbyData = empty;
                 else matchData = empty;
                 currentCameraBounds = { ...DEFAULT_CAMERA_BOUNDS };
                 updateCameraBoundsUI();
+                updateVoidThresholdUI();
                 clearSelection();
                 saveState();
                 render();
@@ -1449,6 +1554,7 @@
             clearSelection();
             currentCameraBounds = lobbyData.cameraBounds || { ...DEFAULT_CAMERA_BOUNDS };
             updateCameraBoundsUI();
+            updateVoidThresholdUI();
             updateScoreboardUI();
             render();
         };
@@ -1459,10 +1565,11 @@
             clearSelection();
             currentCameraBounds = matchData.cameraBounds || { ...DEFAULT_CAMERA_BOUNDS };
             updateCameraBoundsUI();
+            updateVoidThresholdUI();
             render();
         };
 
-        // Export current map only (with safeZones)
+        // Export current map only
         function getCurrentMapExport() {
             const data = getCurrentData();
             const base = {
@@ -1471,7 +1578,8 @@
                 gems: data.gems.map(g => ({ id: g.id, x: g.x, y: g.y, collected: false })),
                 spawnPoints: data.spawnPoints.map(s => ({ id: s.id, x: s.x, y: s.y })),
                 cameraBounds: data.cameraBounds || { ...DEFAULT_CAMERA_BOUNDS },
-                safeZones: data.safeZones  // NEW
+                safeZones: data.safeZones,
+                voidYThreshold: data.voidYThreshold !== undefined ? data.voidYThreshold : DEFAULT_VOID_THRESHOLD
             };
             if (currentMapType === "lobby") {
                 base.doors = {
@@ -1510,7 +1618,7 @@
             URL.revokeObjectURL(url);
         };
 
-        // Full maps.js export (including safeZones)
+        // Full maps.js export
         function generateMapsJS() {
             const lobby = lobbyData;
             const match = matchData;
@@ -1527,7 +1635,8 @@
                     },
                     scoreboard: lobby.scoreboard || { x: 50, y: 50, w: 250, h: 200 },
                     cameraBounds: lobby.cameraBounds || { ...DEFAULT_CAMERA_BOUNDS },
-                    safeZones: lobby.safeZones || []
+                    safeZones: lobby.safeZones || [],
+                    voidYThreshold: lobby.voidYThreshold !== undefined ? lobby.voidYThreshold : DEFAULT_VOID_THRESHOLD
                 },
                 match: {
                     platforms: match.platforms,
@@ -1536,7 +1645,8 @@
                     spawnPoints: match.spawnPoints.map(s => ({ id: s.id, x: s.x, y: s.y })),
                     finishLine: match.finishLine,
                     cameraBounds: match.cameraBounds || { ...DEFAULT_CAMERA_BOUNDS },
-                    safeZones: match.safeZones || []
+                    safeZones: match.safeZones || [],
+                    voidYThreshold: match.voidYThreshold !== undefined ? match.voidYThreshold : DEFAULT_VOID_THRESHOLD
                 }
             };
             return `// maps.js - Auto generated with Map Creator\nconst MAPS = ${JSON.stringify(exportObj, null, 2)};\nwindow.MAPS = MAPS;`;
@@ -1589,7 +1699,7 @@
             document.getElementById('importJsonText').value = '';
         };
 
-        // Initial state saves
+        // ---------- Initialization ----------
         saveState(); // lobby
         currentMapType = "match";
         saveState(); // empty match
@@ -1599,7 +1709,9 @@
         updateExportPreview();
         currentCameraBounds = lobbyData.cameraBounds;
         updateCameraBoundsUI();
+        updateVoidThresholdUI();
         updateScoreboardUI();
+        render();
     </script>
 </body>
 

@@ -264,6 +264,8 @@ function setupHostRoutingRules(conn) {
                     }
 
                     const CELL_SIZE = 40;
+                    const isBomb = (block.type === 'bomb');
+
                     block.blocks.forEach(cell => {
                         platforms.push({
                             x: px + cell.x,
@@ -271,10 +273,25 @@ function setupHostRoutingRules(conn) {
                             w: CELL_SIZE,
                             h: CELL_SIZE,
                             color: block.color,
-                            isDynamicObject: true,
-                            isPlacedCell: true
+                            isPlacedBlock: true,      // <-- essential for explosion detection
+                            isBomb: isBomb,           // <-- marks this platform as a bomb
+                            bombRadius: block.radius || 150
                         });
                     });
+
+                    // If it's a bomb, schedule its explosion
+                    if (isBomb) {
+                        console.log(`[Bomb] Host: Bomb placed at (${px}, ${py}) by client ${senderId}`);
+                        activeBombs.push({
+                            x: px,
+                            y: py,
+                            radius: block.radius || 150,
+                            timer: 0.5,
+                            ownerId: senderId
+                        });
+                        console.log(`[Bomb] activeBombs now length: ${activeBombs.length}`);
+                        broadcastBombs();   // notify all clients about the new bomb
+                    }
 
                     placementCursors[senderId].confirmed = true;
 
@@ -313,6 +330,9 @@ function setupHostRoutingRules(conn) {
                         cursors: placementCursors
                     });
                 }
+                break;
+            case 'sync_bombs':
+                broadcastToRoom('sync_bombs', pkg.payload);
                 break;
         }
     });
@@ -593,6 +613,9 @@ function setupClientRoutingRules(conn) {
                 timerVal = pkg.payload.time;
                 document.getElementById('timer').innerText = timerVal;
                 break;
+            case 'sync_bombs':
+                activeBombs = pkg.payload.activeBombs;
+                break;
             case 'match_over':
                 executeMatchEndingSequence(pkg.payload.summary);
                 break;
@@ -728,6 +751,7 @@ function updateHudDisplays() {
 
 function enterLobbyState() {
     currentEngineMode = 'LOBBY';
+    scoreboardVisible = true;
     lobbyCountdownVal = -1;
     readyPlayers = {};
     raceStarted = false;
@@ -876,7 +900,6 @@ function finalizeMatchAndEnd() {
 // ============================================================================
 function executeActiveMatchStart() {
     scoreboardVisible = false;
-
     currentEngineMode = 'GAME';
     matchPhase = 'CHOOSE';
     readyPlayers = {};
@@ -930,7 +953,13 @@ function executeActiveMatchStart() {
     playerSelectedBlock = {};
     placementCursors = {};
 
-    const shuffledShapes = shuffleArray(DRAFT_SHAPES);
+    // ---- Determine if bomb should be included ----
+    const includeBomb = (previousRoundFinishersCount < totalPlayers / 2);
+    console.log(`[Bomb] includeBomb = ${includeBomb}, finishers=${previousRoundFinishersCount}, total=${totalPlayers}`);
+
+    // Build templates without bomb
+    let templates = AVAILABLE_PLACEMENT_OBJECTS.filter(obj => obj.id !== 'BOMB');
+    const shuffledShapes = shuffleArray(templates);
 
     function getRandomPosition(template, placedShapes) {
         const margin = 20;
@@ -956,7 +985,11 @@ function executeActiveMatchStart() {
 
     const placedShapes = [];
 
-    for (let i = 0; i < totalPlayers + 2; i++) {
+    // Number of regular items: if bomb is included, we reserve one slot for it
+    const regularCount = totalPlayers + 2;
+    const actualCount = includeBomb ? regularCount - 1 : regularCount;
+
+    for (let i = 0; i < actualCount; i++) {
         const template = shuffledShapes[i % shuffledShapes.length];
         const pos = getRandomPosition(template, placedShapes);
         placementPool.push({
@@ -966,6 +999,7 @@ function executeActiveMatchStart() {
             h: template.h,
             color: template.color,
             blocks: template.blocks,
+            radius: template.radius || 0,
             claimedBy: null,
             menuX: pos.x,
             menuY: pos.y
@@ -973,6 +1007,29 @@ function executeActiveMatchStart() {
         placedShapes.push({ menuX: pos.x, menuY: pos.y, w: template.w, h: template.h });
     }
 
+    // If bomb should be included, add it now
+    if (includeBomb) {
+        const bombTemplate = AVAILABLE_PLACEMENT_OBJECTS.find(obj => obj.id === 'BOMB');
+        if (bombTemplate) {
+            let pos = getRandomPosition(bombTemplate, placedShapes);
+            placementPool.push({
+                id: 'bomb_item',
+                type: bombTemplate.type,
+                w: bombTemplate.w,
+                h: bombTemplate.h,
+                color: bombTemplate.color,
+                blocks: bombTemplate.blocks,
+                radius: bombTemplate.radius || 0,
+                claimedBy: null,
+                menuX: pos.x,
+                menuY: pos.y
+            });
+            placedShapes.push({ menuX: pos.x, menuY: pos.y, w: bombTemplate.w, h: bombTemplate.h });
+            console.log('[Bomb] Bomb added to placementPool.');
+        }
+    }
+
+    // Initialize cursors and player state
     for (let id in players) {
         placementCursors[id] = { x: BASE_WIDTH / 2, y: BASE_HEIGHT / 2, confirmed: false };
         players[id].eliminated = false;
@@ -1134,6 +1191,9 @@ function checkAndProcessRaceFinish() {
 let lobbyReturnTimeout = null;
 
 function executeMatchEndingSequence(summary) {
+    previousRoundFinishersCount = finishPositions.length;
+    console.log(`[Match End] finishPositions.length = ${finishPositions.length}, previousRoundFinishersCount set to ${previousRoundFinishersCount}`);
+
     if (gameTimer) {
         clearInterval(gameTimer);
         gameTimer = null;
@@ -1355,7 +1415,6 @@ function resolvePlatformCollision(player) {
 //  UPDATE CHARACTER PHYSICS – 已移除重复平台碰撞，统一调用 resolvePlatformCollision
 // ============================================================================
 function updateCharacterPhysics(player, dt) {
-    // 已到达终点的玩家（非死亡）保持不动，不处理任何物理
     if (player.finished) return;
 
     // ---------- 蹲下处理（仅活人） ----------
@@ -1804,19 +1863,26 @@ let robotHandClawImg = new Image();
 robotHandClawImg.src = 'assets/items/robot_hand_claw.svg';
 
 function drawCanvasLevelLayout() {
+    // ---- Draw platforms (with bomb image support) ----
     platforms.forEach(plat => {
-        ctx.fillStyle = plat.color || '#170c30';
-        ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
-        ctx.strokeStyle = '#7f00ff';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(plat.x, plat.y, plat.w, plat.h);
+        if (plat.isBomb && bombImage.complete) {
+            ctx.drawImage(bombImage, plat.x, plat.y, plat.w, plat.h);
+        } else {
+            ctx.fillStyle = plat.color || '#170c30';
+            ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+            ctx.strokeStyle = '#7f00ff';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(plat.x, plat.y, plat.w, plat.h);
+        }
     });
 
+    // ---- Hazards ----
     hazards.forEach(h => {
         ctx.fillStyle = '#ff003c';
         ctx.fillRect(h.x, h.y, h.w, h.h);
     });
 
+    // ---- Gems ----
     gems.forEach(g => {
         if (!g.collected) {
             ctx.fillStyle = '#00ff66';
@@ -1826,27 +1892,47 @@ function drawCanvasLevelLayout() {
         }
     });
 
+    // ---- Finish line and flag (only in GAME) ----
     if (currentEngineMode === 'GAME') {
-        ctx.fillStyle = '#00ff66';
-        ctx.fillRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
-        ctx.strokeStyle = '#00cc44';
-        ctx.lineWidth = 3;
-        ctx.strokeRect(finishLine.x, finishLine.y, finishLine.w, finishLine.h);
-        ctx.fillStyle = '#ffff00';
-        ctx.fillRect(finishLine.x + finishLine.w / 2 - 2, finishLine.y - 30, 4, 30);
-        const time = Date.now() * 0.001;
-        const flagWave = Math.sin(time * 3) * 8;
-        ctx.fillStyle = '#ff007f';
-        ctx.beginPath();
-        ctx.moveTo(finishLine.x + finishLine.w / 2 + 2, finishLine.y - 20);
-        ctx.lineTo(finishLine.x + finishLine.w / 2 + 20 + flagWave, finishLine.y - 25);
-        ctx.lineTo(finishLine.x + finishLine.w / 2 + 20 + flagWave, finishLine.y - 10);
-        ctx.fill();
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 12px "Orbitron"';
+        const cx = finishLine.x, cy = finishLine.y, cw = finishLine.w, ch = finishLine.h;
+        ctx.fillStyle = '#2E7D32';
+        ctx.fillRect(cx, cy, cw, ch);
+        ctx.strokeStyle = '#FFD700';
+        ctx.lineWidth = 4;
+        ctx.strokeRect(cx, cy, cw, ch);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 18px "Orbitron"';
         ctx.textAlign = 'center';
-        ctx.fillText('FINISH', finishLine.x + finishLine.w / 2, finishLine.y + finishLine.h / 2 + 3);
-    } else if (currentEngineMode === 'LOBBY') {
+        ctx.textBaseline = 'middle';
+        ctx.fillText('FINISH', cx + cw / 2, cy + ch / 2);
+        ctx.textBaseline = 'alphabetic';
+
+        const poleX = cx + cw / 2;
+        const poleTopY = cy - 100;
+        ctx.strokeStyle = '#888';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(poleX, cy);
+        ctx.lineTo(poleX, poleTopY);
+        ctx.stroke();
+
+        const time = Date.now() * 0.001;
+        const wave = Math.sin(time * 2.5) * 15;
+        const flagX = poleX, flagY = poleTopY + 10, flagW = 50, flagH = 30;
+        ctx.fillStyle = '#FF007F';
+        ctx.beginPath();
+        ctx.moveTo(flagX, flagY);
+        ctx.lineTo(flagX + flagW + wave, flagY - 5);
+        ctx.lineTo(flagX + flagW + wave * 0.7, flagY + flagH);
+        ctx.lineTo(flagX, flagY + flagH);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    }
+    else if (currentEngineMode === 'LOBBY') {
+        // ---- Lobby doors ----
         ctx.shadowColor = skinDoor.color;
         ctx.shadowBlur = 15;
         ctx.fillStyle = '#1c0515';
@@ -1875,14 +1961,15 @@ function drawCanvasLevelLayout() {
         ctx.shadowBlur = 0;
     }
 
+    // ---- Projectiles ----
     projectiles.forEach(p => {
         ctx.save();
         ctx.shadowBlur = 0;
-        ctx.beginPath();
         const angle = Math.atan2(p.vy, p.vx);
         const trailLength = 36;
         const backX = p.x - Math.cos(angle) * trailLength;
         const backY = p.y - Math.sin(angle) * trailLength;
+        ctx.beginPath();
         ctx.moveTo(backX, backY);
         ctx.lineTo(p.x, p.y);
         ctx.lineWidth = 1;
@@ -1908,6 +1995,7 @@ function drawCanvasLevelLayout() {
         }
     });
 
+    // ---- Throwables ----
     const MAX_THROWABLE_LIFE = 150;
     for (let t of throwables) {
         ctx.save();
@@ -1940,16 +2028,17 @@ function drawCanvasLevelLayout() {
         ctx.fillText(`${Math.floor(percent * 100)}%`, t.x, barY - 2);
     }
 
+    // ---- World items (pickups) ----
     if (itemManager) {
         for (let wi of itemManager.worldItems) {
             wi.draw(ctx, itemManager);
         }
     }
 
+    // ---- Robot hands ----
     for (let grab of activeRobotHands) {
         const holder = players[grab.holderId];
         if (!holder) continue;
-
         const startX = holder.x + holder.width * 0.5;
         const startY = holder.y + 32;
         const endX = grab.headX || (startX + Math.cos(grab.angle) * 400 * (grab.progress ?? 0));
@@ -1958,7 +2047,6 @@ function drawCanvasLevelLayout() {
         const length = Math.hypot(endX - startX, endY - startY);
 
         ctx.save();
-
         if (robotHandArmImg.complete && robotHandArmImg.naturalWidth > 0 && length > 0) {
             ctx.save();
             ctx.translate(startX, startY);
@@ -1970,7 +2058,6 @@ function drawCanvasLevelLayout() {
             ctx.drawImage(robotHandArmImg, 0, -imgH / 2, imgW, imgH);
             ctx.restore();
         }
-
         if (robotHandClawImg.complete && robotHandClawImg.naturalWidth > 0) {
             ctx.save();
             ctx.translate(endX, endY);
@@ -2877,6 +2964,21 @@ function enginePipelineTick(timestamp) {
                     }
                 }
             } // end if (isHost) for throwables
+
+            // --- BOMB TIMERS (host only) ---
+            if (isHost && matchPhase === 'PLAY') {
+                console.log(`[Bomb] activeBombs length: ${activeBombs.length}`);
+                for (let i = activeBombs.length - 1; i >= 0; i--) {
+                    const bomb = activeBombs[i];
+                    bomb.timer -= dt;
+                    console.log(`[Bomb] bomb at (${bomb.x},${bomb.y}) timer: ${bomb.timer}`);
+                    if (bomb.timer <= 0) {
+                        console.log('[Bomb] Explosion triggered!');
+                        triggerBombExplosion(bomb);
+                        break;
+                    }
+                }
+            }
         }
 
         if (isHost) broadcastThrowables();
